@@ -57,6 +57,13 @@ void ui_blend_pixels(uint32_t *dest, int dest_w, int dest_h, int dx, int dy,
     }
 }
 
+void ui_clear(uint32_t *buffer, int w, int h, uint32_t color) {
+    if (!buffer || w <= 0 || h <= 0) return;
+    for (int i = 0; i < w * h; i++) {
+        buffer[i] = color;
+    }
+}
+
 // Anti-aliased rounded panel renderer
 void ui_draw_panel(uint32_t *buffer, int w, int h, int x, int y, int rw, int rh,
                    uint32_t color, uint32_t border_color, int radius) {
@@ -209,9 +216,30 @@ int ui_font_init(const char *font_path, int font_size) {
     return 0;
 }
 
-void ui_draw_string(uint32_t *buffer, int w, int h, int x, int y,
-                    const char *str, uint32_t color) {
-    if (!g_font_initialized || !buffer || !str) return;
+void ui_font_shutdown(void) {
+    if (g_font_atlas) {
+        free(g_font_atlas);
+        g_font_atlas = NULL;
+    }
+    g_font_initialized = false;
+    g_baked_font_size = 13;
+}
+
+int ui_text_width(const char *text) {
+    if (!g_font_initialized || !text) return 0;
+
+    int width = 0;
+    while (*text) {
+        char c = *text++;
+        if (c < 32 || c > 126) continue;
+        width += g_chardata[c - 32].xadvance;
+    }
+    return width;
+}
+
+void ui_draw_text(uint32_t *buffer, int w, int h, int x, int y,
+                  const char *text, uint32_t color) {
+    if (!g_font_initialized || !buffer || !text) return;
 
     uint32_t src_r = (color >> 16) & 0xFF;
     uint32_t src_g = (color >> 8) & 0xFF;
@@ -224,8 +252,8 @@ void ui_draw_string(uint32_t *buffer, int w, int h, int x, int y,
     // Shift font vertically to match the baseline alignment correctly
     fy += (float)g_baked_font_size * 0.85f;
 
-    while (*str) {
-        char c = *str++;
+    while (*text) {
+        char c = *text++;
         if (c < 32 || c > 126) continue;
 
         stbtt_bakedchar *bc = &g_chardata[c - 32];
@@ -281,3 +309,17 @@ void ui_draw_string(uint32_t *buffer, int w, int h, int x, int y,
         fx += bc->xadvance;
     }
 }
+
+void ui_draw_string(uint32_t *buffer, int w, int h, int x, int y,
+                    const char *str, uint32_t color) {
+    ui_draw_text(buffer, w, h, x, y, str, color);
+}
+
+void ui_draw_text_centered(uint32_t *buffer, int w, int h, int y,
+                           const char *text, uint32_t color) {
+    if (!text) return;
+    int text_width = ui_text_width(text);
+    int x = (w - text_width) / 2;
+    ui_draw_text(buffer, w, h, x, y, text, color);
+}
+

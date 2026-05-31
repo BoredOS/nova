@@ -27,13 +27,13 @@ DESTDIR ?= $(abspath build/dist)
 
 CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -m64 -march=x86-64 -mno-red-zone \
-          -isystem $(SDK_PATH)/include -Ilibnovaproto -Ilibtheme -Ilibui -I.
+          -isystem $(SDK_PATH)/include -Ilibnovaproto -Ilibtheme -Ilibui -Ilibapp -Ilibwidget -I.
 
 LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
           --no-dynamic-linker -z text -z max-page-size=0x1000 -e _start \
           -L$(SDK_PATH)/lib
 
-LIBS = obj/libnovaproto.a obj/libtheme.a obj/libui.a
+LIBS = obj/libnovaproto.a obj/libtheme.a obj/libui.a obj/libapp.a obj/libwidget.a
 APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf
 
 all: bootstrap-sdk
@@ -72,13 +72,21 @@ obj/libui.o: libui/ui.c
 	@mkdir -p obj
 	$(CC) $(CFLAGS) -c $< -o $@
 
+obj/libapp.o: libapp/app.c
+	@mkdir -p obj
+	$(CC) $(CFLAGS) -c $< -o $@
+
+obj/libwidget.o: libwidget/widget.c
+	@mkdir -p obj
+	$(CC) $(CFLAGS) -c $< -o $@
+
 obj/lib%.a: obj/lib%.o
 	$(AR) rcs $@ $<
 
 # Export GUI SDK components into the resolved SDK path
 export-sdk: $(LIBS)
 	mkdir -p $(SDK_PATH)/include $(SDK_PATH)/lib
-	cp libnovaproto/*.h libtheme/*.h libui/*.h $(SDK_PATH)/include/
+	cp libnovaproto/*.h libtheme/*.h libui/*.h libapp/*.h libwidget/*.h $(SDK_PATH)/include/
 	cp $(LIBS) $(SDK_PATH)/lib/
 
 # Compile Desktop Application binaries
@@ -87,7 +95,7 @@ obj/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 %.elf: obj/%.o
-	$(LD) $(LDFLAGS) $(SDK_PATH)/lib/crt0.o $< -lui -ltheme -lnovaproto -lc -o $@
+	$(LD) $(LDFLAGS) $(SDK_PATH)/lib/crt0.o $< -lwidget -lapp -lui -ltheme -lnovaproto -lc -o $@
 
 install: all
 	mkdir -p $(DESTDIR)/bin

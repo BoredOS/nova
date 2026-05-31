@@ -1,0 +1,6 @@
+obj/
+build/
+*.elf
+*.a
+*.o
+.DS_Store

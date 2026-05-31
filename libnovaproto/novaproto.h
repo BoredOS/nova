@@ -8,6 +8,10 @@
 #define NOVA_MAGIC 0x4E4F5641 // 'NOVA'
 #define NOVA_VERSION 1
 
+// Surface Creation Flags
+#define SURFACE_FLAG_TRANSPARENT 0x1
+#define SURFACE_FLAG_NO_RESIZE    0x2
+
 // Message Types (Client -> Nova)
 #define MSG_CREATE_SURFACE      1
 #define MSG_RESIZE_SURFACE      2

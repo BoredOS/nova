@@ -32,8 +32,6 @@
 #define RESIZE_EDGE_TOP 64
 #define RESIZE_EDGE_BOTTOM 128
 
-#define SURFACE_FLAG_TRANSPARENT 0x1
-
 // Autostart configuration items
 typedef struct {
     char path[128];
@@ -751,7 +749,7 @@ surface_t *surface_at(int px, int py, int *click_region_out) {
                 hit = true;
             }
 
-            if (in_outer && region != 2 && region != 4) {
+            if (in_outer && region != 2 && region != 4 && (curr->flags & SURFACE_FLAG_NO_RESIZE) == 0) {
                 bool near_left = px < outer_left + RESIZE_EDGE_MARGIN;
                 bool near_right = px >= outer_right - RESIZE_EDGE_MARGIN;
                 bool near_top = py < outer_top + RESIZE_EDGE_MARGIN;

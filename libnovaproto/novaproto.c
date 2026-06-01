@@ -267,8 +267,17 @@ int nova_resize_surface(int fd, uint32_t surf_id, uint32_t w, uint32_t h, char *
 int nova_damage_surface(int fd, uint32_t surf_id, int rect_count, const NovaRect *rects) {
     uint32_t header_size = 4 + 4;
     uint32_t payload_size = header_size + rect_count * sizeof(NovaRect);
-    uint8_t *buffer = (uint8_t *)malloc(payload_size);
-    if (!buffer) return -1;
+
+    // Stack buffer for common case (up to ~14 rects), avoids malloc/free per frame
+    uint8_t stack_buf[256];
+    uint8_t *buffer = stack_buf;
+    bool heap = false;
+
+    if (payload_size > sizeof(stack_buf)) {
+        buffer = (uint8_t *)malloc(payload_size);
+        if (!buffer) return -1;
+        heap = true;
+    }
 
     *(uint32_t *)(buffer) = surf_id;
     *(uint32_t *)(buffer + 4) = (uint32_t)rect_count;
@@ -277,7 +286,7 @@ int nova_damage_surface(int fd, uint32_t surf_id, int rect_count, const NovaRect
     }
 
     int rc = send_frame(fd, MSG_DAMAGE, buffer, payload_size);
-    free(buffer);
+    if (heap) free(buffer);
     return rc;
 }
 

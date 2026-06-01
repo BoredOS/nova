@@ -135,6 +135,8 @@ static image_t app_icon_img = {0};
 static char search_buf[64] = "";
 static int search_len = 0;
 
+static bool bar_dirty = true;
+
 static bool should_track_window(uint32_t surface_id, const char *title) {
     if (surface_id == bar_surf_id) return false;
     if (surface_id == menu_surf_id) return false;
@@ -1138,7 +1140,7 @@ int main(int argc, char *argv[]) {
     pfd.events = POLLIN;
 
     uint32_t last_clock_tick = 0;
-    draw_taskbar();
+    bar_dirty = true;
 
     while (1) {
         int timeout = 200;
@@ -1150,7 +1152,7 @@ int main(int argc, char *argv[]) {
         uint32_t now = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
         if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
-            draw_taskbar();
+            bar_dirty = true;
         }
 
         if ((pr > 0 && (pfd.revents & POLLIN)) || nova_pending_events()) {
@@ -1179,15 +1181,14 @@ int main(int argc, char *argv[]) {
                         case EVT_POINTER: {
                             uint32_t buttons = ev.data.pointer.buttons;
                             if (buttons & 1) {
-                                uint32_t now_ms = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
                                 if (ev.surface_id == bar_surf_id) {
-                                    if (now_ms - last_bar_click_ms > 180) {
-                                        last_bar_click_ms = now_ms;
+                                    if (now - last_bar_click_ms > 80) {
+                                        last_bar_click_ms = now;
                                         handle_bar_click(ev.data.pointer.x, ev.data.pointer.y);
                                     }
                                 } else if (menu_open && ev.surface_id == menu_surf_id) {
-                                    if (now_ms - last_menu_click_ms > 180) {
-                                        last_menu_click_ms = now_ms;
+                                    if (now - last_menu_click_ms > 80) {
+                                        last_menu_click_ms = now;
                                         handle_menu_click(ev.data.pointer.x, ev.data.pointer.y);
                                     }
                                 }
@@ -1212,8 +1213,13 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (needs_draw) {
-                draw_taskbar();
+                bar_dirty = true;
             }
+        }
+
+        if (bar_dirty) {
+            bar_dirty = false;
+            draw_taskbar();
         }
     }
 

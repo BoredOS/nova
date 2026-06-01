@@ -15,6 +15,7 @@
 #define WCTX_MAX_TEXTINPUTS   16   // max concurrent text input fields
 #define CURSOR_BLINK_FRAMES   30   // frames per cursor half-period
 #define WCTX_MAX_KEYS         8    // max buffered keys per frame
+#define WCTX_MAX_APPS         16   // max attached apps for shared widget runtime
 
 
 static inline uint32_t col_a(uint32_t c) { return (c >> 24) & 0xFF; }
@@ -94,32 +95,70 @@ struct WCtx {
     TextState   tstates[WCTX_MAX_TEXTINPUTS];
 };
 
-static WCtx *g_ctx = NULL;
+static struct {
+    NovaApp *app;
+    WCtx    *ctx;
+} g_app_ctxs[WCTX_MAX_APPS];
+
+static WCtx *_ctx_for_app(NovaApp *app) {
+    if (!app) return NULL;
+    for (int i = 0; i < WCTX_MAX_APPS; i++) {
+        if (g_app_ctxs[i].app == app) return g_app_ctxs[i].ctx;
+    }
+    return NULL;
+}
+
+static bool _register_app_ctx(NovaApp *app, WCtx *ctx) {
+    if (!app || !ctx) return false;
+    for (int i = 0; i < WCTX_MAX_APPS; i++) {
+        if (!g_app_ctxs[i].app) {
+            g_app_ctxs[i].app = app;
+            g_app_ctxs[i].ctx = ctx;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void _unregister_app_ctx(NovaApp *app) {
+    if (!app) return;
+    for (int i = 0; i < WCTX_MAX_APPS; i++) {
+        if (g_app_ctxs[i].app == app) {
+            g_app_ctxs[i].app = NULL;
+            g_app_ctxs[i].ctx = NULL;
+            return;
+        }
+    }
+}
 
 static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
-    if (!g_ctx) return;
+    WCtx *ctx = _ctx_for_app(app);
+    if (!ctx) return;
 
     bool cur = (buttons & 0x1) != 0;
-    bool prv = (g_ctx->mouse_cur & 0x1) != 0;
+    bool prv = (ctx->mouse_cur & 0x1) != 0;
     if (cur && !prv) {
-        g_ctx->lmb_pressed_latch = true;
+        ctx->lmb_pressed_latch = true;
     }
     if (!cur && prv) {
-        g_ctx->lmb_released_latch = true;
+        ctx->lmb_released_latch = true;
     }
 
-    g_ctx->mouse_x   = x;
-    g_ctx->mouse_y   = y;
-    g_ctx->mouse_cur = buttons;
+    ctx->mouse_x   = x;
+    ctx->mouse_y   = y;
+    ctx->mouse_cur = buttons;
     app_request_redraw(app);
 }
 
 static void _cb_key(NovaApp *app, uint32_t keycode, uint32_t modifiers, bool pressed) {
-    if (!g_ctx || !pressed) return;
-    if (g_ctx->key_count < WCTX_MAX_KEYS) {
-        g_ctx->keys[g_ctx->key_count].code = keycode;
-        g_ctx->keys[g_ctx->key_count].mods = modifiers;
-        g_ctx->key_count++;
+    if (!pressed) return;
+    WCtx *ctx = _ctx_for_app(app);
+    if (!ctx) return;
+
+    if (ctx->key_count < WCTX_MAX_KEYS) {
+        ctx->keys[ctx->key_count].code = keycode;
+        ctx->keys[ctx->key_count].mods = modifiers;
+        ctx->key_count++;
     }
     app_request_redraw(app);
 }
@@ -162,7 +201,12 @@ WCtx *wctx_create(NovaApp *app) {
     ctx->active_id = -1;
     ctx->focus_id  = -1;
     ctx->drag_widget_id = -1;
-    g_ctx = ctx;
+
+    if (!_register_app_ctx(app, ctx)) {
+        free(ctx);
+        return NULL;
+    }
+
     app_on_pointer(app, _cb_pointer);
     app_on_key(app, _cb_key);
     return ctx;
@@ -170,7 +214,7 @@ WCtx *wctx_create(NovaApp *app) {
 
 void wctx_destroy(WCtx *ctx) {
     if (!ctx) return;
-    if (g_ctx == ctx) g_ctx = NULL;
+    _unregister_app_ctx(ctx->app);
     free(ctx);
 }
 
@@ -611,12 +655,26 @@ bool widget_textinput(WCtx *ctx, int x, int y, int w, int h,
     if (focused) {
         bool cursor_vis = ((ctx->frame_tick / CURSOR_BLINK_FRAMES) % 2) == 0;
         if (cursor_vis) {
-            // Measure text up to cursor position
-            char tmp[256];
-            int clen = ts->cursor < 255 ? ts->cursor : 255;
-            memcpy(tmp, buf, (size_t)clen);
-            tmp[clen] = '\0';
-            int cx = text_x + app_text_width(tmp);
+            // Measure text up to cursor position and keep cursor aligned
+            int clen = ts->cursor;
+            if (clen < 0) clen = 0;
+            if (clen > len) clen = len;
+
+            int cx;
+            if (clen == 0) {
+                cx = text_x;
+            } else {
+                char *tmp = malloc((size_t)clen + 1);
+                if (tmp) {
+                    memcpy(tmp, buf, (size_t)clen);
+                    tmp[clen] = '\0';
+                    cx = text_x + app_text_width(tmp);
+                    free(tmp);
+                } else {
+                    cx = text_x;
+                }
+            }
+
             _draw_rect_solid(ctx, cx, y + 4, 1, h - 8, th->text_primary);
         }
     }

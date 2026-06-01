@@ -90,26 +90,38 @@ void ui_draw_panel(uint32_t *buffer, int w, int h, int x, int y, int rw, int rh,
     uint32_t bo_g = (border_color >> 8) & 0xFF;
     uint32_t bo_b = border_color & 0xFF;
 
+    if (radius > rw / 2) radius = rw / 2;
+    if (radius > rh / 2) radius = rh / 2;
+
     for (int py = y1; py < y2; py++) {
         uint32_t *row = &buffer[py * w];
+        bool is_corner_y = (py < y + radius || py >= y + rh - radius);
+        int dy = 0;
+        if (py < y + radius) {
+            dy = (y + radius) - py;
+        } else if (py >= y + rh - radius) {
+            dy = py - (y + rh - radius - 1);
+        }
+
         for (int px = x1; px < x2; px++) {
-            // Determine corner sectors
-            int dx = 0, dy = 0;
-            if (px < x + radius) dx = (x + radius) - px;
-            else if (px >= x + rw - radius) dx = px - (x + rw - radius - 1);
-            
-            if (py < y + radius) dy = (y + radius) - py;
-            else if (py >= y + rh - radius) dy = py - (y + rh - radius - 1);
+            bool is_corner_x = (px < x + radius || px >= x + rw - radius);
 
             uint32_t draw_a = bg_a;
             uint32_t draw_r = bg_r;
             uint32_t draw_g = bg_g;
             uint32_t draw_b = bg_b;
 
-            if (dx > 0 && dy > 0) {
+            if (is_corner_y && is_corner_x && radius > 0) {
+                int dx = 0;
+                if (px < x + radius) {
+                    dx = (x + radius) - px;
+                } else {
+                    dx = px - (x + rw - radius - 1);
+                }
+
+                // We are in one of the 4 actual corners 
                 float dist = (float)sqrt((double)(dx * dx + dy * dy));
                 if (dist > (float)radius) {
-                    // Out of rounded boundary, apply soft antialiasing blending at edge
                     float diff = dist - (float)radius;
                     if (diff < 1.0f) {
                         float edge_alpha = 1.0f - diff;
@@ -118,32 +130,27 @@ void ui_draw_panel(uint32_t *buffer, int w, int h, int x, int y, int rw, int rh,
                         continue; // Fully transparent corner pixel
                     }
                 }
-            }
 
-            // Draw border outline (1px ring)
-            bool is_border = false;
-            if (dx > 0 && dy > 0) {
-                float dist = (float)sqrt((double)(dx * dx + dy * dy));
+                // Border calculation on corners
                 if (dist >= (float)(radius - 1.0f) && dist <= (float)radius) {
-                    is_border = true;
+                    draw_a = bo_a;
+                    draw_r = bo_r;
+                    draw_g = bo_g;
+                    draw_b = bo_b;
                 }
             } else {
+                // Non-corner: simple 1px straight borders
                 if (px == x || px == x + rw - 1 || py == y || py == y + rh - 1) {
-                    is_border = true;
+                    draw_a = bo_a;
+                    draw_r = bo_r;
+                    draw_g = bo_g;
+                    draw_b = bo_b;
                 }
-            }
-
-            if (is_border) {
-                draw_a = bo_a;
-                draw_r = bo_r;
-                draw_g = bo_g;
-                draw_b = bo_b;
             }
 
             if (draw_a == 255) {
-                row[px] = (draw_a << 24) | (draw_r << 16) | (draw_g << 8) | draw_b;
+                row[px] = (0xFF << 24) | (draw_r << 16) | (draw_g << 8) | draw_b;
             } else if (draw_a > 0) {
-                // Alpha blend over background
                 uint32_t bg_pixel = row[px];
                 uint32_t dest_a = (bg_pixel >> 24) & 0xFF;
                 uint32_t dest_r = (bg_pixel >> 16) & 0xFF;
@@ -167,7 +174,7 @@ void ui_draw_panel(uint32_t *buffer, int w, int h, int x, int y, int rw, int rh,
 #define ATLAS_W 512
 #define ATLAS_H 512
 static unsigned char *g_font_atlas = NULL;
-static stbtt_bakedchar g_chardata[96]; // ASCII 32..127
+static stbtt_bakedchar g_chardata[96];
 static bool g_font_initialized = false;
 static int g_baked_font_size = 13;
 
@@ -177,7 +184,6 @@ int ui_font_init(const char *font_path, int font_size) {
 
     FILE *f = fopen(path, "rb");
     if (!f) {
-        // Fallback font path in case of missing folder structures
         path = "/usr/include/Library/Fonts/inter.ttf";
         f = fopen(path, "rb");
     }

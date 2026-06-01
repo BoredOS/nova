@@ -82,11 +82,11 @@ static void _damage_all(NovaApp *app) {
 static void _do_draw(NovaApp *app) {
     if (!app->pixels) return;
 
-    // Default: fill with theme background
-    uint32_t bg = app->theme.panel_bg;
-    for (uint32_t i = 0; i < app->width * app->height; i++) {
-        app->pixels[i] = bg;
-    }
+    // Fill with theme background using a tight pointer loop.
+    uint32_t  bg  = app->theme.panel_bg;
+    uint32_t *p   = app->pixels;
+    uint32_t *end = p + app->width * app->height;
+    while (p < end) *p++ = bg;
 
     if (app->cb_draw) {
         app->cb_draw(app);
@@ -191,14 +191,13 @@ int app_run(NovaApp *app) {
     pfd.events = POLLIN;
 
     while (app->running) {
-        // Flush any pending redraws before blocking
-        if (app->dirty) {
-            _do_draw(app);
-        }
-
-        int pr = poll(&pfd, 1, 50);
+        // Use 0ms timeout if a redraw is already pending (don't stall),
+        // otherwise wait up to 16ms (~60fps cap, needed for cursor blink etc.)
+        int timeout = app->dirty ? 0 : 16;
+        int pr = poll(&pfd, 1, timeout);
         if (pr < 0) break;
 
+        // Drain ALL pending events before redrawing
         if ((pr > 0 && (pfd.revents & POLLIN)) || nova_pending_events()) {
             NovaEvent ev;
             while (nova_poll_event(app->fd, &ev) == 0) {
@@ -242,7 +241,6 @@ int app_run(NovaApp *app) {
                     }
 
                     case EVT_THEME_UPDATE: {
-                        // Reload the theme and redraw
                         theme_load("/etc/nova/nova.conf", &app->theme);
                         ui_font_init(app->theme.font_path,
                                      app->theme.font_size);
@@ -254,6 +252,10 @@ int app_run(NovaApp *app) {
                         break;
                 }
             }
+        }
+
+        if (app->dirty) {
+            _do_draw(app);
         }
     }
 

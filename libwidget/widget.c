@@ -12,25 +12,10 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-// ---------------------------------------------------------------------------
-// Compile-time limits
-// ---------------------------------------------------------------------------
-
 #define WCTX_MAX_TEXTINPUTS   16   // max concurrent text input fields
 #define CURSOR_BLINK_FRAMES   30   // frames per cursor half-period
+#define WCTX_MAX_KEYS         8    // max buffered keys per frame
 
-// Default accent: Catppuccin Mocha blue (#89B4FA)
-#define DEFAULT_ACCENT        0xFF89B4FAU
-
-// Default corner radii
-#define RADIUS_BUTTON         6
-#define RADIUS_INPUT          4
-#define RADIUS_PANEL          8
-#define RADIUS_PROGRESS       4
-
-// ---------------------------------------------------------------------------
-// Color helpers
-// ---------------------------------------------------------------------------
 
 static inline uint32_t col_a(uint32_t c) { return (c >> 24) & 0xFF; }
 static inline uint32_t col_r(uint32_t c) { return (c >> 16) & 0xFF; }
@@ -54,18 +39,15 @@ static inline uint32_t col_alpha(uint32_t c, uint32_t a) {
     return (c & 0x00FFFFFFU) | (a << 24);
 }
 
-// ---------------------------------------------------------------------------
-// Text input persistent state (cursor + scroll, keyed by sequential index)
-// ---------------------------------------------------------------------------
-
 typedef struct {
     int  cursor;    // byte position of cursor in buffer
     bool in_use;
 } TextState;
 
-// ---------------------------------------------------------------------------
-// WCtx internal structure
-// ---------------------------------------------------------------------------
+typedef struct {
+    uint32_t code;
+    uint32_t mods;
+} KeyPress;
 
 struct WCtx {
     NovaApp    *app;
@@ -80,10 +62,14 @@ struct WCtx {
     uint32_t    mouse_cur;   // current button bitmask
     uint32_t    mouse_prev;  // previous frame button bitmask
 
-    // Derived single-frame flags (set in wctx_begin from cur/prev)
+    // Derived single-frame flags (set in wctx_begin from cur/prev + latches)
     bool        lmb_just_pressed;
     bool        lmb_just_released;
     bool        lmb_held;
+
+    // Latch mechanisms to prevent missed inputs on quick clicks/moves
+    bool        lmb_pressed_latch;
+    bool        lmb_released_latch;
 
     // Hot/active IDs (widget_idx-based)
     int         hot_id;     // widget under cursor
@@ -97,10 +83,9 @@ struct WCtx {
     float       drag_min, drag_max;
     int         drag_width;
 
-    // Pending key event (set by key callback, consumed in wctx_begin)
-    bool        has_key;
-    uint32_t    key_code;
-    uint32_t    key_mods;
+    // Buffered key events to prevent typed characters loss
+    KeyPress    keys[WCTX_MAX_KEYS];
+    int         key_count;
 
     // Frame tick for cursor blink
     uint32_t    frame_tick;
@@ -109,18 +94,20 @@ struct WCtx {
     TextState   tstates[WCTX_MAX_TEXTINPUTS];
 };
 
-// ---------------------------------------------------------------------------
-// Global context pointer (one per process — BoredOS apps are single-window)
-// ---------------------------------------------------------------------------
-
 static WCtx *g_ctx = NULL;
-
-// ---------------------------------------------------------------------------
-// Input callbacks (installed by wctx_create)
-// ---------------------------------------------------------------------------
 
 static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
     if (!g_ctx) return;
+
+    bool cur = (buttons & 0x1) != 0;
+    bool prv = (g_ctx->mouse_cur & 0x1) != 0;
+    if (cur && !prv) {
+        g_ctx->lmb_pressed_latch = true;
+    }
+    if (!cur && prv) {
+        g_ctx->lmb_released_latch = true;
+    }
+
     g_ctx->mouse_x   = x;
     g_ctx->mouse_y   = y;
     g_ctx->mouse_cur = buttons;
@@ -129,15 +116,13 @@ static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
 
 static void _cb_key(NovaApp *app, uint32_t keycode, uint32_t modifiers, bool pressed) {
     if (!g_ctx || !pressed) return;
-    g_ctx->has_key   = true;
-    g_ctx->key_code  = keycode;
-    g_ctx->key_mods  = modifiers;
+    if (g_ctx->key_count < WCTX_MAX_KEYS) {
+        g_ctx->keys[g_ctx->key_count].code = keycode;
+        g_ctx->keys[g_ctx->key_count].mods = modifiers;
+        g_ctx->key_count++;
+    }
     app_request_redraw(app);
 }
-
-// ---------------------------------------------------------------------------
-// Keycode → printable char conversion
-// ---------------------------------------------------------------------------
 
 static char _key_to_char(uint32_t kc, uint32_t mods) {
     bool shift = (mods & 0x1) != 0;
@@ -160,24 +145,19 @@ static char _key_to_char(uint32_t kc, uint32_t mods) {
     return '\0'; // non-printable
 }
 
-// ---------------------------------------------------------------------------
-// Hit test helper
-// ---------------------------------------------------------------------------
-
 static bool _hit(WCtx *ctx, int x, int y, int w, int h) {
     return (ctx->mouse_x >= x && ctx->mouse_x < x + w &&
             ctx->mouse_y >= y && ctx->mouse_y < y + h);
 }
 
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
-
 WCtx *wctx_create(NovaApp *app) {
     WCtx *ctx = calloc(1, sizeof(WCtx));
     if (!ctx) return NULL;
     ctx->app       = app;
-    ctx->accent    = DEFAULT_ACCENT;
+    
+    const ThemeConfig *th = app_theme(app);
+    ctx->accent    = th ? th->accent_color : 0xFF89B4FAU;
+    
     ctx->hot_id    = -1;
     ctx->active_id = -1;
     ctx->focus_id  = -1;
@@ -198,19 +178,26 @@ void wctx_set_accent(WCtx *ctx, uint32_t argb) {
     if (ctx) ctx->accent = argb;
 }
 
-// ---------------------------------------------------------------------------
-// Frame begin/end
-// ---------------------------------------------------------------------------
-
 void wctx_begin(WCtx *ctx) {
     if (!ctx) return;
+
+    // Synchronize accent with theme if not overridden at runtime
+    const ThemeConfig *th = app_theme(ctx->app);
+    if (th && ctx->accent == 0xFF89B4FAU && th->accent_color != 0xFF89B4FAU) {
+        ctx->accent = th->accent_color;
+    }
 
     // Derive single-frame flags
     bool cur = (ctx->mouse_cur  & 0x1) != 0;
     bool prv = (ctx->mouse_prev & 0x1) != 0;
-    ctx->lmb_just_pressed  = cur && !prv;
-    ctx->lmb_just_released = !cur && prv;
-    ctx->lmb_held          = cur;
+    
+    ctx->lmb_just_pressed  = (cur && !prv) || ctx->lmb_pressed_latch;
+    ctx->lmb_just_released = (!cur && prv) || ctx->lmb_released_latch;
+    ctx->lmb_held          = cur || ctx->lmb_pressed_latch;
+
+    // Reset click latches
+    ctx->lmb_pressed_latch = false;
+    ctx->lmb_released_latch = false;
 
     // Reset per-frame counters
     ctx->widget_idx = 0;
@@ -226,8 +213,8 @@ void wctx_end(WCtx *ctx) {
     // Advance mouse state
     ctx->mouse_prev = ctx->mouse_cur;
 
-    // Clear consumed key
-    ctx->has_key = false;
+    // Clear consumed keys
+    ctx->key_count = 0;
 
     // If mouse released, clear active
     if (ctx->lmb_just_released) {
@@ -236,9 +223,6 @@ void wctx_end(WCtx *ctx) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Draw helpers
-// ---------------------------------------------------------------------------
 
 static void _draw_rect_solid(WCtx *ctx, int x, int y, int w, int h, uint32_t color) {
     uint32_t *px = app_pixels(ctx->app);
@@ -256,9 +240,6 @@ static void _draw_rect_solid(WCtx *ctx, int x, int y, int w, int h, uint32_t col
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display-only widgets
-// ---------------------------------------------------------------------------
 
 void widget_label(WCtx *ctx, int x, int y, const char *text, uint32_t color) {
     if (!ctx || !text) return;
@@ -293,18 +274,19 @@ void widget_progressbar(WCtx *ctx, int x, int y, int w, int h, float value) {
     if (value > 1.0f) value = 1.0f;
 
     const ThemeConfig *th = app_theme(ctx->app);
-    uint32_t track_bg     = col_shift(th->panel_bg, -12);
+    uint32_t track_bg     = th->widget_bg ? th->widget_bg : col_shift(th->panel_bg, -12);
     uint32_t track_border = th->panel_border;
     uint32_t fill         = ctx->accent;
 
     // Track
-    app_draw_rect(ctx->app, x, y, w, h, track_bg, track_border, RADIUS_PROGRESS);
+    app_draw_rect(ctx->app, x, y, w, h, track_bg, track_border, th->widget_radius_progress);
 
     // Fill
     int fill_w = (int)((float)(w - 2) * value);
     if (fill_w > 0) {
+        int r = th->widget_radius_progress > 1 ? th->widget_radius_progress - 1 : 0;
         app_draw_rect(ctx->app, x + 1, y + 1, fill_w, h - 2,
-                      fill, 0x00000000, RADIUS_PROGRESS - 1);
+                      fill, 0x00000000, r);
     }
 }
 
@@ -321,7 +303,8 @@ void widget_panel(WCtx *ctx, int x, int y, int w, int h, int radius) {
     const ThemeConfig *th = app_theme(ctx->app);
     uint32_t bg     = col_shift(th->panel_bg, 8);
     uint32_t border = th->panel_border;
-    app_draw_rect(ctx->app, x, y, w, h, bg, border, radius);
+    int r = radius >= 0 ? radius : th->widget_radius_panel;
+    app_draw_rect(ctx->app, x, y, w, h, bg, border, r);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,28 +329,28 @@ bool widget_button(WCtx *ctx, int x, int y, int w, int h, const char *label) {
     bool clicked = (ctx->active_id == id && ctx->lmb_just_released && hovered);
     if (clicked) ctx->active_id = -1;
 
-    // Choose colors
+    // Choose colors from theme settings
     uint32_t bg, border, text_color;
     if (ctx->active_id == id) {
-        bg         = col_shift(ctx->accent, -20);
+        bg         = th->widget_bg_active ? th->widget_bg_active : col_shift(ctx->accent, -20);
         border     = ctx->accent;
-        text_color = 0xFFFFFFFF;
+        text_color = th->text_primary;
     } else if (hovered) {
-        bg         = col_shift(th->panel_bg, 30);
+        bg         = th->widget_bg_hover ? th->widget_bg_hover : col_shift(th->widget_bg ? th->widget_bg : th->panel_bg, 30);
         border     = col_shift(th->panel_border, 20);
         text_color = th->text_primary;
     } else {
-        bg         = col_shift(th->panel_bg, 15);
+        bg         = th->widget_bg ? th->widget_bg : col_shift(th->panel_bg, 15);
         border     = th->panel_border;
         text_color = th->text_primary;
     }
 
-    app_draw_rect(ctx->app, x, y, w, h, bg, border, RADIUS_BUTTON);
+    app_draw_rect(ctx->app, x, y, w, h, bg, border, th->widget_radius_button);
 
     // Centered label
     int tw = app_text_width(label);
     int tx = x + (w - tw) / 2;
-    int ty = y + (h - app_theme(ctx->app)->font_size) / 2;
+    int ty = y + (h - th->font_size) / 2;
     app_draw_string(ctx->app, tx, ty, label, text_color);
 
     return clicked;
@@ -394,19 +377,19 @@ bool widget_checkbox(WCtx *ctx, int x, int y, const char *label, bool *checked) 
         ctx->active_id = -1;
     }
 
-    // Box
+    // Box background
     uint32_t box_bg = *checked
         ? ctx->accent
-        : col_shift(th->panel_bg, hovered ? 25 : 10);
+        : (th->widget_bg ? th->widget_bg : col_shift(th->panel_bg, hovered ? 25 : 10));
     uint32_t box_border = hovered ? col_shift(th->panel_border, 20) : th->panel_border;
 
-    app_draw_rect(ctx->app, x, y, box_size, box_size, box_bg, box_border, 3);
+    app_draw_rect(ctx->app, x, y, box_size, box_size, box_bg, box_border, th->widget_radius_input);
 
     // Check mark (simple ✓ drawn as two rects)
     if (*checked) {
         int mx = x + 3, my = y + box_size / 2;
-        _draw_rect_solid(ctx, mx,     my,     3, 3, 0xFFFFFFFF);
-        _draw_rect_solid(ctx, mx + 2, my - 3, 3, 6, 0xFFFFFFFF);
+        _draw_rect_solid(ctx, mx,     my,     3, 3, th->text_primary);
+        _draw_rect_solid(ctx, mx + 2, my - 3, 3, 6, th->text_primary);
     }
 
     // Label text
@@ -445,7 +428,7 @@ bool widget_radio(WCtx *ctx, int x, int y, int option_index,
     uint32_t ring_color = hovered
         ? col_shift(th->panel_border, 30)
         : th->panel_border;
-    uint32_t bg = col_shift(th->panel_bg, 10);
+    uint32_t bg = th->widget_bg ? th->widget_bg : col_shift(th->panel_bg, 10);
     app_draw_rect(ctx->app, x, y, dot_size, dot_size, bg, ring_color, dot_size / 2);
 
     // Inner fill when selected
@@ -512,9 +495,9 @@ bool widget_slider(WCtx *ctx, int x, int y, int w,
     }
 
     // Track
-    uint32_t track_bg     = col_shift(th->panel_bg, -15);
+    uint32_t track_bg     = th->widget_bg ? th->widget_bg : col_shift(th->panel_bg, -15);
     uint32_t track_border = th->panel_border;
-    app_draw_rect(ctx->app, x, track_y, w, track_h, track_bg, track_border, RADIUS_PROGRESS);
+    app_draw_rect(ctx->app, x, track_y, w, track_h, track_bg, track_border, th->widget_radius_progress);
 
     // Filled portion
     float norm = (*value - min_val) / (max_val - min_val);
@@ -523,19 +506,19 @@ bool widget_slider(WCtx *ctx, int x, int y, int w,
     int fill_w = (int)((float)(w - thumb_w) * norm) + thumb_w / 2;
     if (fill_w > 0)
         app_draw_rect(ctx->app, x, track_y, fill_w, track_h,
-                      col_alpha(ctx->accent, 0xCC), 0x00000000, RADIUS_PROGRESS);
+                      col_alpha(ctx->accent, 0xCC), 0x00000000, th->widget_radius_progress);
 
     // Thumb
     int thumb_x = x + (int)((float)(w - thumb_w) * norm);
     bool thumb_hov = (ctx->drag_widget_id == id) || _hit(ctx, thumb_x, y, thumb_w, thumb_h);
     uint32_t thumb_bg = thumb_hov
         ? ctx->accent
-        : col_shift(th->panel_bg, 40);
+        : (th->widget_bg ? col_shift(th->widget_bg, 25) : col_shift(th->panel_bg, 40));
     uint32_t thumb_border = thumb_hov
         ? col_shift(ctx->accent, 20)
         : col_shift(th->panel_border, 20);
     app_draw_rect(ctx->app, thumb_x, y, thumb_w, thumb_h,
-                  thumb_bg, thumb_border, RADIUS_BUTTON);
+                  thumb_bg, thumb_border, th->widget_radius_button);
 
     return changed;
 }
@@ -570,55 +553,57 @@ bool widget_textinput(WCtx *ctx, int x, int y, int w, int h,
 
     // Handle key input when focused
     bool entered = false;
-    if (focused && ctx->has_key) {
-        uint32_t kc   = ctx->key_code;
-        uint32_t mods = ctx->key_mods;
+    if (focused && ctx->key_count > 0) {
+        for (int i = 0; i < ctx->key_count; i++) {
+            uint32_t kc   = ctx->keys[i].code;
+            uint32_t mods = ctx->keys[i].mods;
 
-        if (kc == KEY_ENTER) {
-            entered = true;
-        } else if (kc == KEY_BACKSPACE) {
-            if (ts->cursor > 0 && len > 0) {
-                memmove(buf + ts->cursor - 1, buf + ts->cursor,
-                        (size_t)(len - ts->cursor + 1));
-                ts->cursor--;
-            }
-        } else if (kc == KEY_LEFT) {
-            if (ts->cursor > 0) ts->cursor--;
-        } else if (kc == KEY_RIGHT) {
-            if (ts->cursor < len) ts->cursor++;
-        } else if (kc == KEY_ESCAPE) {
-            ctx->focus_id = -1;
-        } else {
-            char ch = _key_to_char(kc, mods);
-            if (ch && len + 1 < (int)buf_size) {
-                memmove(buf + ts->cursor + 1, buf + ts->cursor,
-                        (size_t)(len - ts->cursor + 1));
-                buf[ts->cursor] = ch;
-                ts->cursor++;
+            if (kc == KEY_ENTER) {
+                entered = true;
+            } else if (kc == KEY_BACKSPACE) {
+                if (ts->cursor > 0 && len > 0) {
+                    memmove(buf + ts->cursor - 1, buf + ts->cursor,
+                            (size_t)(len - ts->cursor + 1));
+                    ts->cursor--;
+                    len--;
+                }
+            } else if (kc == KEY_LEFT) {
+                if (ts->cursor > 0) ts->cursor--;
+            } else if (kc == KEY_RIGHT) {
+                if (ts->cursor < len) ts->cursor++;
+            } else if (kc == KEY_ESCAPE) {
+                ctx->focus_id = -1;
+                break;
+            } else {
+                char ch = _key_to_char(kc, mods);
+                if (ch && len + 1 < (int)buf_size) {
+                    memmove(buf + ts->cursor + 1, buf + ts->cursor,
+                            (size_t)(len - ts->cursor + 1));
+                    buf[ts->cursor] = ch;
+                    ts->cursor++;
+                    len++;
+                }
             }
         }
-        ctx->has_key = false; // consumed
     }
 
     // Draw box
-    uint32_t bg     = col_shift(th->panel_bg, -10);
+    uint32_t bg     = th->widget_bg ? th->widget_bg : col_shift(th->panel_bg, -10);
     uint32_t border = focused
         ? ctx->accent
         : (hovered ? col_shift(th->panel_border, 20) : th->panel_border);
-    app_draw_rect(ctx->app, x, y, w, h, bg, border, RADIUS_INPUT);
+    app_draw_rect(ctx->app, x, y, w, h, bg, border, th->widget_radius_input);
 
     // Padding inside box
-    int pad = 6;
+    int pad = th->widget_padding;
     int text_x = x + pad;
     int text_y = y + (h - th->font_size) / 2;
 
     // Draw text or placeholder
     len = (int)strlen(buf);
     if (len == 0 && !focused && placeholder) {
-        app_draw_string(ctx->app, text_x, text_y, placeholder,
-                        col_alpha(th->text_primary, 0x60));
+        app_draw_string(ctx->app, text_x, text_y, placeholder, th->text_dim);
     } else if (len > 0) {
-        // Clip text to box width — simple approach: draw and let ui_draw_string clip
         app_draw_string(ctx->app, text_x, text_y, buf, th->text_primary);
     }
 

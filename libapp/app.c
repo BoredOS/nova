@@ -90,6 +90,8 @@ static bool _socket_readable(struct pollfd *pfd) {
 static void _do_draw(NovaApp *app) {
     if (!app->pixels) return;
 
+    app->dirty = false;
+
     // Fill with theme background using a tight pointer loop.
     uint32_t  bg  = app->theme.panel_bg;
     uint32_t *p   = app->pixels;
@@ -101,7 +103,6 @@ static void _do_draw(NovaApp *app) {
     }
 
     _damage_all(app);
-    app->dirty = false;
 }
 
 static bool _handle_resize(NovaApp *app, uint32_t new_w, uint32_t new_h) {

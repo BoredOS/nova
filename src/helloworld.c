@@ -39,13 +39,16 @@ static void on_draw(NovaApp *app) {
         app_request_redraw(app);
 
     widget_label(st->ctx, 28, 132, "Theme:", 0xFFA6ADC8);
-    widget_radio(st->ctx, 90,  132, 0, &st->theme_choice, "Blue");
-    widget_radio(st->ctx, 155, 132, 1, &st->theme_choice, "Purple");
-    widget_radio(st->ctx, 225, 132, 2, &st->theme_choice, "Green");
+    bool theme_changed = false;
+    theme_changed |= widget_radio(st->ctx, 90,  132, 0, &st->theme_choice, "Blue");
+    theme_changed |= widget_radio(st->ctx, 155, 132, 1, &st->theme_choice, "Purple");
+    theme_changed |= widget_radio(st->ctx, 225, 132, 2, &st->theme_choice, "Green");
 
     // Update accent based on theme choice
     static const uint32_t accents[3] = {0xFF89B4FA, 0xFFCBA6F7, 0xFFA6E3A1};
     wctx_set_accent(st->ctx, accents[st->theme_choice]);
+    if (theme_changed)
+        app_request_redraw(app);
 
     widget_panel(st->ctx, 16, 170, w - 32, 66, 8);
     widget_label(st->ctx, 28, 180, "Name", 0xFFA6ADC8);

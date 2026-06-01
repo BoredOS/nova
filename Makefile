@@ -94,7 +94,7 @@ obj/%.o: src/%.c
 	@mkdir -p obj
 	$(CC) $(CFLAGS) -c $< -o $@
 
-%.elf: obj/%.o
+%.elf: obj/%.o $(LIBS)
 	$(LD) $(LDFLAGS) $(SDK_PATH)/lib/crt0.o $< -lwidget -lapp -lui -ltheme -lnovaproto -lc -o $@
 
 install: all

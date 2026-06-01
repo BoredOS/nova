@@ -128,6 +128,7 @@ void copy_box_to_fb(int bx, int by, int bw, int bh);
 static int mx = 0;
 static int my = 0;
 static bool last_left_pressed = false;
+static uint32_t pointer_grab_surface_id = 0;
 static int last_cursor_x = -1;
 static int last_cursor_y = -1;
 static bool cursor_visible = false;
@@ -142,6 +143,36 @@ static bool has_dirty_rect = false;
 // Composition flags
 static bool needs_composite = false;
 static bool needs_cursor_only = false;
+
+static void mark_dirty_rect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0 || screen_w <= 0 || screen_h <= 0) return;
+
+    int x1 = x < 0 ? 0 : x;
+    int y1 = y < 0 ? 0 : y;
+    int x2 = x + w;
+    int y2 = y + h;
+    if (x2 > screen_w) x2 = screen_w;
+    if (y2 > screen_h) y2 = screen_h;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    if (!has_dirty_rect) {
+        dirty_x = x1;
+        dirty_y = y1;
+        dirty_w = x2 - x1;
+        dirty_h = y2 - y1;
+        has_dirty_rect = true;
+        return;
+    }
+
+    int old_x2 = dirty_x + dirty_w;
+    int old_y2 = dirty_y + dirty_h;
+    if (x1 < dirty_x) dirty_x = x1;
+    if (y1 < dirty_y) dirty_y = y1;
+    if (x2 > old_x2) old_x2 = x2;
+    if (y2 > old_y2) old_y2 = y2;
+    dirty_w = old_x2 - dirty_x;
+    dirty_h = old_y2 - dirty_y;
+}
 
 // Signal self-pipe descriptors
 static int sig_pipe[2] = { -1, -1 };
@@ -297,6 +328,23 @@ surface_t *surface_find(uint32_t surf_id) {
 }
 
 static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *payload, uint32_t size);
+
+static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
+    if (!surf || !surf->mapped) return false;
+
+    struct {
+        uint32_t surface_id;
+        int x, y;
+        uint32_t buttons;
+    } __attribute__((packed)) pl = {
+        surf->surface_id,
+        mx - surf->x,
+        my - surf->y,
+        buttons
+    };
+
+    return send_frame(surf->client_fd, EVT_POINTER, surf->surface_id, &pl, sizeof(pl)) == 0;
+}
 
 static uint32_t get_ticks_ms(void) {
     return (uint32_t)sys_system(16 /* SYSTEM_CMD_GET_TICKS */, 0, 0, 0, 0);
@@ -1165,10 +1213,19 @@ void compositor_composite(void) {
                 }
 
                 bool has_decorations = (layer == 1 || layer == 2);
+                bool dirty_inside_content =
+                    partial_render &&
+                    render_x >= curr->x &&
+                    render_y >= curr->y &&
+                    render_x + render_w <= curr->x + (int)curr->w &&
+                    render_y + render_h <= curr->y + (int)curr->h;
+                bool draw_decorations =
+                    has_decorations &&
+                    (!partial_render || !dirty_inside_content || (curr->flags & SURFACE_FLAG_TRANSPARENT));
                 uint32_t border_color = curr->focused ? active_border : inactive_border;
 
                 // Render titlebar if NORMAL or FLOATING window
-                if (has_decorations) {
+                if (draw_decorations) {
                     // 1. Draw flat content border outline below the titlebar
                     ui_draw_panel(back_buffer, screen_w, screen_h, 
                                   curr->x - BORDER_WIDTH, curr->y,
@@ -1230,7 +1287,16 @@ void compositor_composite(void) {
                 if (blend_pixels) {
                     surface_t temp = *curr;
                     temp.pixels = blend_pixels;
-                    blit_surface_pixels(&temp, curr->x, curr->y, curr->w, curr->h);
+                    if (partial_render && (curr->flags & SURFACE_FLAG_TRANSPARENT) == 0) {
+                        int ix = 0, iy = 0, iw = 0, ih = 0;
+                        if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
+                                           render_x, render_y, render_w, render_h,
+                                           &ix, &iy, &iw, &ih)) {
+                            blit_surface_pixels(&temp, (uint32_t)ix, (uint32_t)iy, (uint32_t)iw, (uint32_t)ih);
+                        }
+                    } else {
+                        blit_surface_pixels(&temp, curr->x, curr->y, curr->w, curr->h);
+                    }
                 }
             }
             curr = curr->next;
@@ -1461,6 +1527,13 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             uint32_t surf_id = *(uint32_t *)buffer;
             surface_t *surf = surface_find(surf_id);
             if (surf) {
+                uint32_t rect_count = 0;
+                if (header.payload_size >= 8) {
+                    rect_count = *(uint32_t *)(buffer + 4);
+                    uint32_t max_rects = (header.payload_size - 8) / sizeof(NovaRect);
+                    if (rect_count > max_rects) rect_count = max_rects;
+                }
+
                 if (!surf->mapped) {
                     surf->mapped = true;
                 }
@@ -1486,6 +1559,38 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     if (surf->resize_request_queued) {
                         queue_resize_request(surf, surf->resize_desired_w, surf->resize_desired_h, surf->resize_force_next_request);
                     }
+                }
+
+                if (surf->flags & SURFACE_FLAG_TRANSPARENT) {
+                    int vx = 0, vy = 0, vw = 0, vh = 0;
+                    surface_visual_bounds(surf, &vx, &vy, &vw, &vh);
+                    mark_dirty_rect(vx, vy, vw, vh);
+                } else if (rect_count > 0) {
+                    const NovaRect *rects = (const NovaRect *)(buffer + 8);
+                    int surf_w = (int)surf->w;
+                    int surf_h = (int)surf->h;
+
+                    for (uint32_t i = 0; i < rect_count; i++) {
+                        int rx = rects[i].x;
+                        int ry = rects[i].y;
+                        int rw = (int)rects[i].w;
+                        int rh = (int)rects[i].h;
+
+                        if (rw <= 0 || rh <= 0 || rx >= surf_w || ry >= surf_h) continue;
+                        if (rx < 0) {
+                            rw += rx;
+                            rx = 0;
+                        }
+                        if (ry < 0) {
+                            rh += ry;
+                            ry = 0;
+                        }
+                        if (rx + rw > surf_w) rw = surf_w - rx;
+                        if (ry + rh > surf_h) rh = surf_h - ry;
+                        mark_dirty_rect(surf->x + rx, surf->y + ry, rw, rh);
+                    }
+                } else {
+                    mark_dirty_rect(surf->x, surf->y, (int)surf->w, (int)surf->h);
                 }
             }
             break;
@@ -1922,6 +2027,11 @@ int main(int argc, char *argv[]) {
                             surface_t *hovered = NULL;
 
                             surface_t *focused = surface_get_focused();
+                            surface_t *grabbed = pointer_grab_surface_id ? surface_find(pointer_grab_surface_id) : NULL;
+                            if (pointer_grab_surface_id && !grabbed) {
+                                pointer_grab_surface_id = 0;
+                            }
+
                             bool active_drag = left_pressed && last_left_pressed && focused && (focused->is_dragging || focused->is_resizing);
                             if (!active_drag) {
                                 hovered = surface_at(mx, my, &click_region);
@@ -1977,12 +2087,8 @@ int main(int argc, char *argv[]) {
                                             needs_composite = true;
                                         } else if (click_region == 0) {
                                             // Content click: route pointer event
-                                            struct {
-                                                uint32_t surface_id;
-                                                int x, y;
-                                                uint32_t buttons;
-                                            } __attribute__((packed)) pl = {hovered->surface_id, mx - hovered->x, my - hovered->y, flags & 0x7};
-                                            send_frame(hovered->client_fd, EVT_POINTER, hovered->surface_id, &pl, sizeof(pl));
+                                            pointer_grab_surface_id = hovered->surface_id;
+                                            send_pointer_event(hovered, flags & 0x7);
                                         }
                                     } else {
                                         // Clicked background: unfocus active window
@@ -2013,14 +2119,15 @@ int main(int argc, char *argv[]) {
                                         } else {
                                             needs_composite = true;
                                         }
-                                    } else if (hovered && click_region == 0) {
+                                    } else {
                                         // Continuous content pointer moves
-                                        struct {
-                                            uint32_t surface_id;
-                                            int x, y;
-                                            uint32_t buttons;
-                                        } __attribute__((packed)) pl = {hovered->surface_id, mx - hovered->x, my - hovered->y, flags & 0x7};
-                                        send_frame(hovered->client_fd, EVT_POINTER, hovered->surface_id, &pl, sizeof(pl));
+                                        surface_t *target = grabbed;
+                                        if (!target && hovered && click_region == 0) {
+                                            target = hovered;
+                                        }
+                                        if (target) {
+                                            send_pointer_event(target, flags & 0x7);
+                                        }
                                     }
                                 }
                             } else {
@@ -2039,23 +2146,20 @@ int main(int argc, char *argv[]) {
                                 }
 
                                 // Normal pointer movements (hover routing)
-                                if (hovered && click_region == 0) {
-                                    struct {
-                                        uint32_t surface_id;
-                                        int x, y;
-                                        uint32_t buttons;
-                                    } __attribute__((packed)) pl = {hovered->surface_id, mx - hovered->x, my - hovered->y, 0};
-                                    send_frame(hovered->client_fd, EVT_POINTER, hovered->surface_id, &pl, sizeof(pl));
+                                surface_t *target = grabbed;
+                                if (!target && hovered && click_region == 0) {
+                                    target = hovered;
                                 }
+                                if (target) {
+                                    send_pointer_event(target, 0);
+                                }
+                                pointer_grab_surface_id = 0;
                             }
 
                             if ((dx != 0 || dy != 0) && !fast_drag_handled) {
                                 if (!needs_composite) {
                                     needs_cursor_only = true;
                                 }
-                            }
-                            if (left_pressed != last_left_pressed) {
-                                needs_composite = true;
                             }
                             last_left_pressed = left_pressed;
                             mouse_idx = 0;

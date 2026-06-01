@@ -79,6 +79,14 @@ static void _damage_all(NovaApp *app) {
     nova_damage_surface(app->fd, app->surf_id, 1, &r);
 }
 
+static bool _socket_readable(struct pollfd *pfd) {
+    if (!pfd) return false;
+
+    pfd->revents = 0;
+    int pr = poll(pfd, 1, 0);
+    return pr > 0 && (pfd->revents & POLLIN);
+}
+
 static void _do_draw(NovaApp *app) {
     if (!app->pixels) return;
 
@@ -196,11 +204,21 @@ int app_run(NovaApp *app) {
         int timeout = app->dirty ? 0 : 16;
         int pr = poll(&pfd, 1, timeout);
         if (pr < 0) break;
+        if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
+            app->running = false;
+            break;
+        }
 
-        // Drain ALL pending events before redrawing
+        // Drain currently available events before redrawing. nova_poll_event()
+        // performs a blocking socket read, so guard each call with poll(0).
         if ((pr > 0 && (pfd.revents & POLLIN)) || nova_pending_events()) {
             NovaEvent ev;
-            while (nova_poll_event(app->fd, &ev) == 0) {
+            while (nova_pending_events() || _socket_readable(&pfd)) {
+                if (nova_poll_event(app->fd, &ev) < 0) {
+                    app->running = false;
+                    break;
+                }
+
                 switch (ev.type) {
                     case EVT_CLOSE_REQUEST: {
                         bool allow = true;

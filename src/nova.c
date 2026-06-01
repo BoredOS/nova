@@ -295,9 +295,12 @@ void surface_add(surface_t *surf) {
 }
 
 static void present_framebuffer(int x, int y, int w, int h) {
-    if (fb_fd >= 0 && back_buffer && fb_mem) {
+    if (fb_fd >= 0 && back_buffer) {
         if (w <= 0 || h <= 0) return;
-        copy_box_to_fb(x, y, w, h);
+        struct { int x; int y; int w; int h; } rect = { x, y, w, h };
+        // Tell kernel which region is dirty, then request a present.
+        ioctl(fb_fd, FBIOSET_DIRTY, &rect);
+        ioctl(fb_fd, FBIOPAN_DISPLAY, NULL);
     }
 }
 
@@ -349,6 +352,7 @@ static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
 static uint32_t get_ticks_ms(void) {
     return (uint32_t)sys_system(16 /* SYSTEM_CMD_GET_TICKS */, 0, 0, 0, 0);
 }
+
 
 static void scale_nearest_rgba(uint32_t *dst, uint32_t dst_w, uint32_t dst_h, const uint32_t *src, uint32_t src_w, uint32_t src_h) {
     if (!dst || !src || dst_w == 0 || dst_h == 0 || src_w == 0 || src_h == 0) return;
@@ -937,7 +941,6 @@ void copy_box_to_fb(int bx, int by, int bw, int bh) {
     int end_y = (by + bh > screen_h) ? screen_h : by + bh;
     int copy_w = end_x - start_x;
     if (copy_w <= 0) return;
-
     for (int y = start_y; y < end_y; y++) {
         uint8_t *fb_row_bytes = (uint8_t*)fb_mem + (uint64_t)y * finfo.line_length;
         uint32_t *fb_row = (uint32_t*)(fb_row_bytes + (uint64_t)start_x * sizeof(uint32_t));
@@ -1079,6 +1082,8 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
     int draw_h = draw_y2 - draw_y1;
     if (draw_w <= 0 || draw_h <= 0) return;
 
+    int blit_area = draw_w * draw_h;
+
     int src_x = draw_x1 - surf->x;
     int src_y = draw_y1 - surf->y;
     bool opaque = (surf->flags & SURFACE_FLAG_TRANSPARENT) == 0;
@@ -1119,6 +1124,8 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
             dst_row[x] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
         }
     }
+
+    (void)blit_area;
 }
 
 void update_cursor_atomic_combined(int new_x, int new_y) {
@@ -1405,6 +1412,7 @@ void compositor_composite(void) {
     last_cursor_x = mx;
     last_cursor_y = my;
     cursor_visible = true;
+    
 }
 
 // Client IPC message handlers
@@ -1460,18 +1468,6 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (shm_fd >= 0) {
                 uint32_t sz = p->w * p->h * 4;
                 surf->shm_size = sz;
-                
-                // Write zeros to pre-allocate size on shmfs VFS
-                uint8_t *zeros = malloc(4096);
-                memset(zeros, 0, 4096);
-                uint32_t written = 0;
-                while (written < sz) {
-                    uint32_t chunk = (sz - written > 4096) ? 4096 : (sz - written);
-                    write(shm_fd, zeros, chunk);
-                    written += chunk;
-                }
-                free(zeros);
-
                 surf->pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
                 close(shm_fd);
             }
@@ -1523,16 +1519,6 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                 int shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT, 0777);
                 if (shm_fd >= 0) {
                     uint32_t sz = p->w * p->h * 4;
-                    uint8_t *zeros = malloc(4096);
-                    memset(zeros, 0, 4096);
-                    uint32_t written = 0;
-                    while (written < sz) {
-                        uint32_t chunk = (sz - written > 4096) ? 4096 : (sz - written);
-                        write(shm_fd, zeros, chunk);
-                        written += chunk;
-                    }
-                    free(zeros);
-
                     surf->pending_pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
                     close(shm_fd);
                 }

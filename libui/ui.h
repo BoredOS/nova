@@ -25,6 +25,9 @@ void ui_font_shutdown(void);
 // Returns the rendered pixel width of a string with the current baked font
 int ui_text_width(const char *text);
 
+// Returns the rendered pixel width of the first n characters of a string.
+int ui_text_width_n(const char *text, int n);
+
 // Renders a string using the pre-baked font bitmap atlas
 void ui_draw_text(uint32_t *buffer, int w, int h, int x, int y,
                   const char *text, uint32_t color);

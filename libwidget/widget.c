@@ -144,10 +144,13 @@ static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
         ctx->lmb_released_latch = true;
     }
 
+    bool moved = (ctx->mouse_x != x) || (ctx->mouse_y != y) || (ctx->mouse_cur != buttons);
     ctx->mouse_x   = x;
     ctx->mouse_y   = y;
     ctx->mouse_cur = buttons;
-    app_request_redraw(app);
+    if (moved) {
+        app_request_redraw(app);
+    }
 }
 
 static void _cb_key(NovaApp *app, uint32_t keycode, uint32_t modifiers, bool pressed) {
@@ -655,26 +658,11 @@ bool widget_textinput(WCtx *ctx, int x, int y, int w, int h,
     if (focused) {
         bool cursor_vis = ((ctx->frame_tick / CURSOR_BLINK_FRAMES) % 2) == 0;
         if (cursor_vis) {
-            // Measure text up to cursor position and keep cursor aligned
             int clen = ts->cursor;
             if (clen < 0) clen = 0;
             if (clen > len) clen = len;
 
-            int cx;
-            if (clen == 0) {
-                cx = text_x;
-            } else {
-                char *tmp = malloc((size_t)clen + 1);
-                if (tmp) {
-                    memcpy(tmp, buf, (size_t)clen);
-                    tmp[clen] = '\0';
-                    cx = text_x + app_text_width(tmp);
-                    free(tmp);
-                } else {
-                    cx = text_x;
-                }
-            }
-
+            int cx = text_x + app_text_width_n(buf, clen);
             _draw_rect_solid(ctx, cx, y + 4, 1, h - 8, th->text_primary);
         }
     }

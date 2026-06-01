@@ -373,6 +373,10 @@ int app_text_width(const char *text) {
     return ui_text_width(text);
 }
 
+int app_text_width_n(const char *text, int n) {
+    return ui_text_width_n(text, n);
+}
+
 void app_draw_rect(NovaApp *app, int x, int y, int w, int h,
                    uint32_t fill_color, uint32_t border_color, int radius) {
     if (!app || !app->pixels) return;

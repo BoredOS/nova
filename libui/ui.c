@@ -243,6 +243,18 @@ int ui_text_width(const char *text) {
     return width;
 }
 
+int ui_text_width_n(const char *text, int n) {
+    if (!g_font_initialized || !text || n <= 0) return 0;
+
+    int width = 0;
+    for (int i = 0; i < n && text[i]; i++) {
+        char c = text[i];
+        if (c < 32 || c > 126) continue;
+        width += g_chardata[c - 32].xadvance;
+    }
+    return width;
+}
+
 void ui_draw_text(uint32_t *buffer, int w, int h, int x, int y,
                   const char *text, uint32_t color) {
     if (!g_font_initialized || !buffer || !text) return;

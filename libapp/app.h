@@ -85,6 +85,9 @@ void app_draw_string_centered(NovaApp *app, int y, const char *text, uint32_t co
 // Measure the rendered pixel width of a string with the active font.
 int app_text_width(const char *text);
 
+// Measure the width of the first n characters of a string.
+int app_text_width_n(const char *text, int n);
+
 // Draw a filled, optionally rounded rectangle.
 // Use radius=0 for a sharp rectangle.
 void app_draw_rect(NovaApp *app, int x, int y, int w, int h,

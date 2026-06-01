@@ -26,7 +26,7 @@ static void on_draw(NovaApp *app) {
 
     wctx_begin(st->ctx);
 
-    widget_label(st->ctx, 20, 16, "Hello, BoredOS!", 0xFFFFFFFF); // ik there is the title window, but this is just for demo purposes
+    widget_label(st->ctx, 20, 16, "Hello, BoredOS!", 0xFFFFFFFF);
     widget_separator(st->ctx, 20, 36, w - 40, true);
 
     widget_panel(st->ctx, 16, 48, w - 32, 110, 8);

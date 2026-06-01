@@ -815,8 +815,34 @@ static void draw_menu(void) {
 
 static void close_menu(void);
 
+static int menu_hidden_x(void) {
+    return -MENU_W - 16;
+}
+
+static int menu_hidden_y(void) {
+    return config.position_bottom ? screen_h + 16 : -MENU_H - 16;
+}
+
+static int menu_visible_y(void) {
+    int menu_y = config.position_bottom ? (screen_h - (int)bar_h - MENU_H) : (int)bar_h;
+    return menu_y < 0 ? 0 : menu_y;
+}
+
+static void destroy_menu_surface(void) {
+    if (menu_surf_id) {
+        nova_destroy_surface(fd, menu_surf_id);
+        menu_surf_id = 0;
+    }
+    if (menu_pixels) {
+        munmap(menu_pixels, MENU_W * MENU_H * 4);
+        menu_pixels = NULL;
+    }
+    menu_open = false;
+}
+
 static void close_taskbar(void) {
     close_menu();
+    destroy_menu_surface();
     if (bar_surf_id) {
         nova_destroy_surface(fd, bar_surf_id);
         bar_surf_id = 0;
@@ -867,14 +893,11 @@ static void reset_menu_search(void) {
 
 static void close_menu(void) {
     if (!menu_open) return;
-    nova_destroy_surface(fd, menu_surf_id);
-    if (menu_pixels) {
-        munmap(menu_pixels, MENU_W * MENU_H * 4);
-        menu_pixels = NULL;
-    }
-    menu_surf_id = 0;
     menu_open = false;
-    draw_taskbar();
+    if (menu_surf_id) {
+        nova_set_state(fd, menu_surf_id, 0);
+        nova_move_surface(fd, menu_surf_id, menu_hidden_x(), menu_hidden_y());
+    }
 
     if (resume_focus_id != 0) {
         nova_set_state(fd, resume_focus_id, 1 /* active focused state */);
@@ -882,21 +905,19 @@ static void close_menu(void) {
     }
 }
 
-static void open_menu(void) {
-    if (menu_open) return;
-
-    resume_focus_id = last_active_surface_id;
+static bool ensure_menu_surface(void) {
+    if (menu_surf_id && menu_pixels) return true;
 
     char shm_path[128];
     if (nova_create_surface(fd, MENU_W, MENU_H, MENU_LAYER, 0, &menu_surf_id, shm_path) < 0) {
-        return;
+        return false;
     }
 
     int shm_fd = open(shm_path, O_RDWR);
     if (shm_fd < 0) {
         nova_destroy_surface(fd, menu_surf_id);
         menu_surf_id = 0;
-        return;
+        return false;
     }
 
     menu_pixels = mmap(NULL, MENU_W * MENU_H * 4, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -905,20 +926,23 @@ static void open_menu(void) {
         menu_pixels = NULL;
         nova_destroy_surface(fd, menu_surf_id);
         menu_surf_id = 0;
-        return;
+        return false;
     }
 
-    int menu_x = 0;
-    int menu_y = config.position_bottom ? (screen_h - bar_h - MENU_H) : (int)bar_h;
-    if (menu_y < 0) menu_y = 0;
+    nova_move_surface(fd, menu_surf_id, menu_hidden_x(), menu_hidden_y());
+    return true;
+}
 
-    nova_move_surface(fd, menu_surf_id, menu_x, menu_y);
-    nova_set_state(fd, menu_surf_id, 1 /* focused */);
+static void open_menu(void) {
+    if (menu_open) return;
+    if (!ensure_menu_surface()) return;
 
+    resume_focus_id = last_active_surface_id;
     reset_menu_search();
     menu_open = true;
+    nova_move_surface(fd, menu_surf_id, 0, menu_visible_y());
     draw_menu();
-    draw_taskbar();
+    nova_set_state(fd, menu_surf_id, 1 /* focused */);
 }
 
 static void handle_bar_click(int click_x, int click_y) {

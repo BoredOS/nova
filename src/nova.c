@@ -1058,42 +1058,66 @@ static bool try_fast_translate_drag(surface_t *surf, int old_vis_x, int old_vis_
     return false;
 }
 
-static void blit_surface_pixels(surface_t *surf, uint32_t dst_x, uint32_t dst_y, uint32_t copy_w, uint32_t copy_h) {
-    if (!surf || !surf->pixels || copy_w == 0 || copy_h == 0) return;
+static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_w, int copy_h) {
+    if (!surf || !surf->pixels || copy_w <= 0 || copy_h <= 0) return;
 
+    int draw_x1 = dst_x;
+    int draw_y1 = dst_y;
+    int draw_x2 = dst_x + copy_w;
+    int draw_y2 = dst_y + copy_h;
+
+    if (draw_x1 < surf->x) draw_x1 = surf->x;
+    if (draw_y1 < surf->y) draw_y1 = surf->y;
+    if (draw_x2 > surf->x + (int)surf->w) draw_x2 = surf->x + (int)surf->w;
+    if (draw_y2 > surf->y + (int)surf->h) draw_y2 = surf->y + (int)surf->h;
+    if (draw_x1 < 0) draw_x1 = 0;
+    if (draw_y1 < 0) draw_y1 = 0;
+    if (draw_x2 > screen_w) draw_x2 = screen_w;
+    if (draw_y2 > screen_h) draw_y2 = screen_h;
+
+    int draw_w = draw_x2 - draw_x1;
+    int draw_h = draw_y2 - draw_y1;
+    if (draw_w <= 0 || draw_h <= 0) return;
+
+    int src_x = draw_x1 - surf->x;
+    int src_y = draw_y1 - surf->y;
     bool opaque = (surf->flags & SURFACE_FLAG_TRANSPARENT) == 0;
-    if (!opaque) {
-        ui_blend_pixels(back_buffer, screen_w, screen_h, surf->x, surf->y, surf->pixels, surf->w, surf->h, 1.0f);
-        return;
-    }
 
-    uint32_t src_x = 0;
-    uint32_t src_y = 0;
-    uint32_t draw_x = dst_x;
-    uint32_t draw_y = dst_y;
-    uint32_t draw_w = copy_w;
-    uint32_t draw_h = copy_h;
-
-    if ((int)draw_x < surf->x) {
-        uint32_t delta = (uint32_t)(surf->x - (int)draw_x);
-        src_x += delta;
-        draw_x += delta;
-        draw_w -= delta;
-    }
-    if ((int)draw_y < surf->y) {
-        uint32_t delta = (uint32_t)(surf->y - (int)draw_y);
-        src_y += delta;
-        draw_y += delta;
-        draw_h -= delta;
-    }
-    if (draw_x + draw_w > (uint32_t)screen_w) draw_w = (uint32_t)screen_w - draw_x;
-    if (draw_y + draw_h > (uint32_t)screen_h) draw_h = (uint32_t)screen_h - draw_y;
-    if (draw_w == 0 || draw_h == 0) return;
-
-    for (uint32_t y = 0; y < draw_h; y++) {
-        uint32_t *dst_row = &back_buffer[(draw_y + y) * screen_w + draw_x];
+    for (int y = 0; y < draw_h; y++) {
+        uint32_t *dst_row = &back_buffer[(draw_y1 + y) * screen_w + draw_x1];
         uint32_t *src_row = &surf->pixels[(src_y + y) * surf->w + src_x];
-        memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
+        if (opaque) {
+            memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
+            continue;
+        }
+
+        for (int x = 0; x < draw_w; x++) {
+            uint32_t src_pixel = src_row[x];
+            uint32_t src_a = (src_pixel >> 24) & 0xFF;
+            if (src_a == 0) continue;
+            if (src_a == 255) {
+                dst_row[x] = src_pixel;
+                continue;
+            }
+
+            uint32_t dst_pixel = dst_row[x];
+            uint32_t dst_a = (dst_pixel >> 24) & 0xFF;
+            uint32_t out_a = src_a + dst_a * (255 - src_a) / 255;
+            if (out_a == 0) continue;
+
+            uint32_t src_r = (src_pixel >> 16) & 0xFF;
+            uint32_t src_g = (src_pixel >> 8) & 0xFF;
+            uint32_t src_b = src_pixel & 0xFF;
+            uint32_t dst_r = (dst_pixel >> 16) & 0xFF;
+            uint32_t dst_g = (dst_pixel >> 8) & 0xFF;
+            uint32_t dst_b = dst_pixel & 0xFF;
+
+            uint32_t out_r = (src_r * src_a + dst_r * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_g = (src_g * src_a + dst_g * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_b = (src_b * src_a + dst_b * dst_a * (255 - src_a) / 255) / out_a;
+
+            dst_row[x] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+        }
     }
 }
 
@@ -1287,15 +1311,15 @@ void compositor_composite(void) {
                 if (blend_pixels) {
                     surface_t temp = *curr;
                     temp.pixels = blend_pixels;
-                    if (partial_render && (curr->flags & SURFACE_FLAG_TRANSPARENT) == 0) {
+                    if (partial_render) {
                         int ix = 0, iy = 0, iw = 0, ih = 0;
                         if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
                                            render_x, render_y, render_w, render_h,
                                            &ix, &iy, &iw, &ih)) {
-                            blit_surface_pixels(&temp, (uint32_t)ix, (uint32_t)iy, (uint32_t)iw, (uint32_t)ih);
+                            blit_surface_pixels(&temp, ix, iy, iw, ih);
                         }
                     } else {
-                        blit_surface_pixels(&temp, curr->x, curr->y, curr->w, curr->h);
+                        blit_surface_pixels(&temp, curr->x, curr->y, (int)curr->w, (int)curr->h);
                     }
                 }
             }

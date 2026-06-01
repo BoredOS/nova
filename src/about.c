@@ -7,15 +7,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include "libapp/app.h"
 #include "libwidget/widget.h"
 #include "stb_image.h"
 
+#define BRANDING_PATH     "/Library/images/branding/bOS_full_gradient_cropped.png"
 #define BRANDING_TARGET_W 350
+#define BRANDING_FALLBACK_H 88
 #define OFFSET_X          35
 #define OFFSET_Y          15
 #define LINE_H            17
@@ -32,6 +32,48 @@ typedef struct {
     char      kernel_version[128];
     char      build_date[128];
 } AboutState;
+
+static bool load_file_to_buffer(const char *path, unsigned char **out_buf, size_t *out_size) {
+    if (!path || !out_buf || !out_size) return false;
+    *out_buf = NULL;
+    *out_size = 0;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return false;
+    }
+
+    long size = ftell(f);
+    if (size <= 0 || size > 16 * 1024 * 1024) {
+        fclose(f);
+        return false;
+    }
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+
+    unsigned char *buf = malloc((size_t)size);
+    if (!buf) {
+        fclose(f);
+        return false;
+    }
+
+    size_t read_size = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    if (read_size != (size_t)size) {
+        free(buf);
+        return false;
+    }
+
+    *out_buf = buf;
+    *out_size = (size_t)size;
+    return true;
+}
 
 static void scale_rgba_to_argb(const unsigned char *rgba,
                                 int src_w, int src_h,
@@ -70,33 +112,35 @@ static void scale_rgba_to_argb(const unsigned char *rgba,
 }
 
 static void load_branding_image(AboutState *st) {
-    const char *path = "/Library/images/branding/bOS_full_gradient_cropped.png";
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return;
+    st->branding_w = BRANDING_TARGET_W;
+    st->branding_h = BRANDING_FALLBACK_H;
 
-    off_t size = lseek(fd, 0, SEEK_END);
-    lseek(fd, 0, SEEK_SET);
-    if (size <= 0) { close(fd); return; }
+    unsigned char *buf = NULL;
+    size_t size = 0;
+    if (!load_file_to_buffer(BRANDING_PATH, &buf, &size)) return;
 
-    unsigned char *buf = malloc((size_t)size);
-    if (!buf) { close(fd); return; }
-
-    if (read(fd, buf, (size_t)size) != size) { free(buf); close(fd); return; }
-    close(fd);
-
-    int img_w, img_h, channels;
+    int img_w = 0, img_h = 0, channels = 0;
     unsigned char *rgba = stbi_load_from_memory(buf, (int)size,
                                                 &img_w, &img_h, &channels, 4);
     free(buf);
-    if (!rgba) return;
+    if (!rgba || img_w <= 0 || img_h <= 0) {
+        if (rgba) stbi_image_free(rgba);
+        return;
+    }
 
-    st->branding_w = BRANDING_TARGET_W;
-    st->branding_h = (img_h * BRANDING_TARGET_W) / img_w;
+    int target_h = (int)(((int64_t)img_h * BRANDING_TARGET_W) / img_w);
+    if (target_h <= 0) {
+        stbi_image_free(rgba);
+        return;
+    }
+    st->branding_h = target_h;
 
     st->branding_pixels = malloc((size_t)(st->branding_w * st->branding_h) * sizeof(uint32_t));
     if (st->branding_pixels) {
         scale_rgba_to_argb(rgba, img_w, img_h,
                            st->branding_pixels, st->branding_w, st->branding_h);
+    } else {
+        st->branding_h = BRANDING_FALLBACK_H;
     }
     stbi_image_free(rgba);
 }
@@ -107,13 +151,13 @@ static void read_system_info(AboutState *st) {
     strcpy(st->kernel_version, "Unknown Kernel");
     strcpy(st->build_date,     "Unknown Build");
 
-    int fd = open("/proc/version", O_RDONLY);
-    if (fd < 0) return;
-
     char v_buf[512];
-    ssize_t bytes = read(fd, v_buf, sizeof(v_buf) - 1);
-    close(fd);
-    if (bytes <= 0) return;
+    FILE *f = fopen("/proc/version", "r");
+    if (!f) return;
+
+    size_t bytes = fread(v_buf, 1, sizeof(v_buf) - 1, f);
+    fclose(f);
+    if (bytes == 0) return;
     v_buf[bytes] = '\0';
 
     char *l1 = v_buf;
@@ -138,6 +182,12 @@ static void on_draw(NovaApp *app) {
         int img_x = (w - st->branding_w) / 2;
         widget_image(st->ctx, img_x, OFFSET_Y,
                      st->branding_pixels, st->branding_w, st->branding_h, 1.0f);
+    } else {
+        int img_x = (w - st->branding_w) / 2;
+        app_draw_rect(app, img_x, OFFSET_Y, st->branding_w, st->branding_h,
+                      0xFF24273A, 0xFF45475A, 8);
+        app_draw_string_centered(app, OFFSET_Y + st->branding_h / 2 - 8,
+                                 "BoredOS", 0xFFFFFFFF);
     }
 
     // System info block

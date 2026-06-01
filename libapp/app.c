@@ -12,7 +12,20 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <poll.h>
+
+// poll() forward declarations 
+#ifndef POLLIN
+#define POLLIN  0x001
+#define POLLOUT 0x004
+#define POLLERR 0x008
+#define POLLHUP 0x010
+struct pollfd {
+    int   fd;
+    short events;
+    short revents;
+};
+extern int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+#endif
 
 struct NovaApp {
     int fd;

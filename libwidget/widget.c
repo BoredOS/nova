@@ -16,6 +16,7 @@
 #define CURSOR_BLINK_FRAMES   30   // frames per cursor half-period
 #define WCTX_MAX_KEYS         8    // max buffered keys per frame
 #define WCTX_MAX_APPS         16   // max attached apps for shared widget runtime
+#define WCTX_MAX_HIT_RECTS    64
 
 
 static inline uint32_t col_a(uint32_t c) { return (c >> 24) & 0xFF; }
@@ -50,6 +51,11 @@ typedef struct {
     uint32_t mods;
 } KeyPress;
 
+typedef struct {
+    int id;
+    int x, y, w, h;
+} HitRect;
+
 struct WCtx {
     NovaApp    *app;
     uint32_t    accent;
@@ -76,6 +82,8 @@ struct WCtx {
     int         hot_id;     // widget under cursor
     int         active_id;  // widget being held/dragged
     int         focus_id;   // widget with keyboard focus (text input)
+    HitRect    hit_rects[WCTX_MAX_HIT_RECTS];
+    int         hit_rect_count;
 
     // Slider drag state
     int         drag_widget_id;
@@ -131,12 +139,19 @@ static void _unregister_app_ctx(NovaApp *app) {
     }
 }
 
+static int _hot_id_at(WCtx *ctx, int x, int y);
+
 static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
     WCtx *ctx = _ctx_for_app(app);
     if (!ctx) return;
 
     bool cur = (buttons & 0x1) != 0;
     bool prv = (ctx->mouse_cur & 0x1) != 0;
+    bool moved_pos = (ctx->mouse_x != x) || (ctx->mouse_y != y);
+    bool buttons_changed = ctx->mouse_cur != buttons;
+    int old_hot_id = ctx->hot_id;
+    int new_hot_id = _hot_id_at(ctx, x, y);
+
     if (cur && !prv) {
         ctx->lmb_pressed_latch = true;
     }
@@ -144,11 +159,13 @@ static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
         ctx->lmb_released_latch = true;
     }
 
-    bool moved = (ctx->mouse_x != x) || (ctx->mouse_y != y) || (ctx->mouse_cur != buttons);
     ctx->mouse_x   = x;
     ctx->mouse_y   = y;
     ctx->mouse_cur = buttons;
-    if (moved) {
+    ctx->hot_id    = new_hot_id;
+
+    bool dragging = ctx->drag_widget_id >= 0 && cur;
+    if (buttons_changed || (moved_pos && (new_hot_id != old_hot_id || dragging))) {
         app_request_redraw(app);
     }
 }
@@ -190,6 +207,34 @@ static char _key_to_char(uint32_t kc, uint32_t mods) {
 static bool _hit(WCtx *ctx, int x, int y, int w, int h) {
     return (ctx->mouse_x >= x && ctx->mouse_x < x + w &&
             ctx->mouse_y >= y && ctx->mouse_y < y + h);
+}
+
+static bool _point_in_rect(int px, int py, const HitRect *r) {
+    return r && px >= r->x && px < r->x + r->w &&
+           py >= r->y && py < r->y + r->h;
+}
+
+static int _hot_id_at(WCtx *ctx, int x, int y) {
+    if (!ctx) return -1;
+    for (int i = ctx->hit_rect_count - 1; i >= 0; i--) {
+        if (_point_in_rect(x, y, &ctx->hit_rects[i])) {
+            return ctx->hit_rects[i].id;
+        }
+    }
+    return -1;
+}
+
+static void _register_hit_rect(WCtx *ctx, int id, int x, int y, int w, int h) {
+    if (!ctx || w <= 0 || h <= 0 || ctx->hit_rect_count >= WCTX_MAX_HIT_RECTS) {
+        return;
+    }
+
+    HitRect *r = &ctx->hit_rects[ctx->hit_rect_count++];
+    r->id = id;
+    r->x = x;
+    r->y = y;
+    r->w = w;
+    r->h = h;
 }
 
 WCtx *wctx_create(NovaApp *app) {
@@ -249,6 +294,7 @@ void wctx_begin(WCtx *ctx) {
     // Reset per-frame counters
     ctx->widget_idx = 0;
     ctx->tinput_idx = 0;
+    ctx->hit_rect_count = 0;
     ctx->hot_id     = -1;  // rebuilt each frame by widgets
 
     ctx->frame_tick++;
@@ -363,6 +409,7 @@ bool widget_button(WCtx *ctx, int x, int y, int w, int h, const char *label) {
     int id = ctx->widget_idx++;
 
     const ThemeConfig *th = app_theme(ctx->app);
+    _register_hit_rect(ctx, id, x, y, w, h);
     bool hovered = _hit(ctx, x, y, w, h);
 
     // Update hot
@@ -413,8 +460,10 @@ bool widget_checkbox(WCtx *ctx, int x, int y, const char *label, bool *checked) 
 
     const ThemeConfig *th = app_theme(ctx->app);
     int box_size = th->font_size + 2;
+    int hit_w = box_size + app_text_width(label) + 8;
 
-    bool hovered = _hit(ctx, x, y, box_size + app_text_width(label) + 8, box_size);
+    _register_hit_rect(ctx, id, x, y, hit_w, box_size);
+    bool hovered = _hit(ctx, x, y, hit_w, box_size);
     if (hovered) ctx->hot_id = id;
     if (hovered && ctx->lmb_just_pressed) ctx->active_id = id;
 
@@ -457,8 +506,10 @@ bool widget_radio(WCtx *ctx, int x, int y, int option_index,
 
     const ThemeConfig *th = app_theme(ctx->app);
     int dot_size = th->font_size + 2;
+    int hit_w = dot_size + app_text_width(label) + 8;
 
-    bool hovered = _hit(ctx, x, y, dot_size + app_text_width(label) + 8, dot_size);
+    _register_hit_rect(ctx, id, x, y, hit_w, dot_size);
+    bool hovered = _hit(ctx, x, y, hit_w, dot_size);
     if (hovered) ctx->hot_id = id;
     if (hovered && ctx->lmb_just_pressed) ctx->active_id = id;
 
@@ -510,6 +561,7 @@ bool widget_slider(WCtx *ctx, int x, int y, int w,
     int track_y   = y + (thumb_h - track_h) / 2;
     int total_h   = thumb_h;
 
+    _register_hit_rect(ctx, id, x, y, w, total_h);
     bool hovered = _hit(ctx, x, y, w, total_h);
     if (hovered) ctx->hot_id = id;
 
@@ -589,6 +641,7 @@ bool widget_textinput(WCtx *ctx, int x, int y, int w, int h,
     if (ts->cursor > len) ts->cursor = len;
 
     const ThemeConfig *th = app_theme(ctx->app);
+    _register_hit_rect(ctx, id, x, y, w, h);
     bool hovered = _hit(ctx, x, y, w, h);
     if (hovered) ctx->hot_id = id;
 

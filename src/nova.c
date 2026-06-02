@@ -332,6 +332,41 @@ surface_t *surface_find(uint32_t surf_id) {
     return NULL;
 }
 
+static void place_new_toplevel_surface(surface_t *surf) {
+    if (!surf) return;
+
+    int existing_toplevels = 0;
+    surface_t *curr = surface_head;
+    while (curr) {
+        if (curr->layer == 1 || curr->layer == 2) {
+            existing_toplevels++;
+        }
+        curr = curr->next;
+    }
+
+    const int cascade_step = 28;
+    const int cascade_slots = 8;
+    int offset = (existing_toplevels % cascade_slots) * cascade_step;
+
+    int min_x = BORDER_WIDTH;
+    int min_y = TITLEBAR_HEIGHT + BORDER_WIDTH;
+    int max_x = screen_w - (int)surf->w - BORDER_WIDTH;
+    int max_y = screen_h - (int)surf->h - BORDER_WIDTH;
+    if (max_x < min_x) max_x = min_x;
+    if (max_y < min_y) max_y = min_y;
+
+    int x = (screen_w - (int)surf->w) / 2 + offset;
+    int y = (screen_h - (int)surf->h) / 2 + offset;
+
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+    if (x < min_x) x = min_x;
+    if (y < min_y) y = min_y;
+
+    surf->x = x;
+    surf->y = y;
+}
+
 static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *payload, uint32_t size);
 
 static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
@@ -1476,9 +1511,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
 
             // Window decoration rules (Normal windows are centered, overlaid layers at 0,0)
             if (surf->layer == 1 || surf->layer == 2) {
-                surf->x = (screen_w - (int)surf->w) / 2;
-                surf->y = (screen_h - (int)surf->h) / 2;
-                if (surf->y < TITLEBAR_HEIGHT) surf->y = TITLEBAR_HEIGHT;
+                place_new_toplevel_surface(surf);
                 strcpy(surf->title, "Application Window");
             } else {
                 surf->x = 0;

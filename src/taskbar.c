@@ -1165,9 +1165,6 @@ int main(int argc, char *argv[]) {
             timeout = 0;
         }
         int pr = poll(&pfd, 1, timeout);
-        if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
-            close_taskbar();
-        }
 
         uint32_t now = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
         if (now - last_clock_tick >= 1000) {
@@ -1232,7 +1229,7 @@ int main(int argc, char *argv[]) {
                             break;
                     }
                 } else {
-                    close_taskbar();
+                    break;
                 }
             }
             if (needs_draw) {

@@ -43,6 +43,10 @@ int app_run(NovaApp *app);
 // Safe to call from within callbacks.
 void app_request_redraw(NovaApp *app);
 
+// Request that only a rectangular region be presented after redraw.
+// Coordinates are relative to the content area.
+void app_request_redraw_rect(NovaApp *app, int x, int y, int w, int h);
+
 void app_on_draw(NovaApp *app, AppDrawCallback cb);
 void app_on_key(NovaApp *app, AppKeyCallback cb);
 void app_on_pointer(NovaApp *app, AppPointerCallback cb);

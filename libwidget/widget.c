@@ -140,6 +140,7 @@ static void _unregister_app_ctx(NovaApp *app) {
 }
 
 static int _hot_id_at(WCtx *ctx, int x, int y);
+static bool _request_hit_rect_redraw(WCtx *ctx, int id);
 
 static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
     WCtx *ctx = _ctx_for_app(app);
@@ -165,8 +166,17 @@ static void _cb_pointer(NovaApp *app, int x, int y, uint32_t buttons) {
     ctx->hot_id    = new_hot_id;
 
     bool dragging = ctx->drag_widget_id >= 0 && cur;
-    if (buttons_changed || (moved_pos && (new_hot_id != old_hot_id || dragging))) {
-        app_request_redraw(app);
+    if (buttons_changed) {
+        _request_hit_rect_redraw(ctx, old_hot_id);
+        _request_hit_rect_redraw(ctx, new_hot_id);
+        _request_hit_rect_redraw(ctx, ctx->active_id);
+    }
+    if (moved_pos && new_hot_id != old_hot_id) {
+        _request_hit_rect_redraw(ctx, old_hot_id);
+        _request_hit_rect_redraw(ctx, new_hot_id);
+    }
+    if (moved_pos && dragging) {
+        _request_hit_rect_redraw(ctx, ctx->drag_widget_id);
     }
 }
 
@@ -180,7 +190,7 @@ static void _cb_key(NovaApp *app, uint32_t keycode, uint32_t modifiers, bool pre
         ctx->keys[ctx->key_count].mods = modifiers;
         ctx->key_count++;
     }
-    app_request_redraw(app);
+    _request_hit_rect_redraw(ctx, ctx->focus_id);
 }
 
 static char _key_to_char(uint32_t kc, uint32_t mods) {
@@ -235,6 +245,27 @@ static void _register_hit_rect(WCtx *ctx, int id, int x, int y, int w, int h) {
     r->y = y;
     r->w = w;
     r->h = h;
+}
+
+static const HitRect *_find_hit_rect(WCtx *ctx, int id) {
+    if (!ctx || id < 0) return NULL;
+    for (int i = ctx->hit_rect_count - 1; i >= 0; i--) {
+        if (ctx->hit_rects[i].id == id) {
+            return &ctx->hit_rects[i];
+        }
+    }
+    return NULL;
+}
+
+static bool _request_hit_rect_redraw(WCtx *ctx, int id) {
+    const HitRect *r = _find_hit_rect(ctx, id);
+    if (!ctx || !r) return false;
+
+    const int pad = 3;
+    app_request_redraw_rect(ctx->app,
+                            r->x - pad, r->y - pad,
+                            r->w + pad * 2, r->h + pad * 2);
+    return true;
 }
 
 WCtx *wctx_create(NovaApp *app) {

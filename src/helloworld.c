@@ -29,14 +29,19 @@ static void on_draw(NovaApp *app) {
     widget_label(st->ctx, 20, 16, "Hello, BoredOS!", 0xFFFFFFFF);
     widget_separator(st->ctx, 20, 36, w - 40, true);
 
+    if (widget_button(st->ctx, w - 100, 360, 80, 32, "Reset")) {
+        st->click_count = 0;
+        st->brightness  = 0.5f;
+        app_request_redraw_rect(app, 16, 248, w - 32, 112);
+        app_request_redraw_rect(app, 145, 360, 96, 32);
+    }
+
     widget_panel(st->ctx, 16, 48, w - 32, 110, 8);
     widget_label(st->ctx, 28, 58, "Features", 0xFFA6ADC8);
 
-    if (widget_checkbox(st->ctx, 28, 80, "Enable feature", &st->feature_enabled))
-        app_request_redraw(app);
+    widget_checkbox(st->ctx, 28, 80, "Enable feature", &st->feature_enabled);
 
-    if (widget_checkbox(st->ctx, 28, 106, "Dark mode overlay", &st->dark_mode))
-        app_request_redraw(app);
+    widget_checkbox(st->ctx, 28, 106, "Dark mode overlay", &st->dark_mode);
 
     widget_label(st->ctx, 28, 132, "Theme:", 0xFFA6ADC8);
     bool theme_changed = false;
@@ -47,8 +52,10 @@ static void on_draw(NovaApp *app) {
     // Update accent based on theme choice
     static const uint32_t accents[3] = {0xFF89B4FA, 0xFFCBA6F7, 0xFFA6E3A1};
     wctx_set_accent(st->ctx, accents[st->theme_choice]);
-    if (theme_changed)
-        app_request_redraw(app);
+    if (theme_changed) {
+        app_request_redraw_rect(app, 84, 126, 230, 28);
+        app_request_redraw_rect(app, 16, 248, w - 32, 112);
+    }
 
     widget_panel(st->ctx, 16, 170, w - 32, 66, 8);
     widget_label(st->ctx, 28, 180, "Name", 0xFFA6ADC8);
@@ -60,23 +67,19 @@ static void on_draw(NovaApp *app) {
     widget_panel(st->ctx, 16, 248, w - 32, 56, 8);
     widget_labelf(st->ctx, 28, 258, 0xFFA6ADC8,
                   "Brightness: %.0f%%", st->brightness * 100.0f);
-    widget_slider(st->ctx, 28, 278, w - 56, &st->brightness, 0.0f, 1.0f);
+    if (widget_slider(st->ctx, 28, 278, w - 56, &st->brightness, 0.0f, 1.0f)) {
+        app_request_redraw_rect(app, 16, 248, w - 32, 112);
+    }
 
     widget_label(st->ctx, 20, 316, "Progress", 0xFFA6ADC8);
     widget_progressbar(st->ctx, 20, 334, w - 40, 14, st->brightness);
 
     if (widget_button(st->ctx, 20, 360, 120, 32, "Click me!")) {
         st->click_count++;
-        app_request_redraw(app);
+        app_request_redraw_rect(app, 145, 360, 96, 32);
     }
 
     widget_labelf(st->ctx, 152, 370, 0xFFA6ADC8, "Count: %d", st->click_count);
-
-    if (widget_button(st->ctx, w - 100, 360, 80, 32, "Reset")) {
-        st->click_count = 0;
-        st->brightness  = 0.5f;
-        app_request_redraw(app);
-    }
 
     wctx_end(st->ctx);
 }

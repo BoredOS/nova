@@ -27,6 +27,8 @@ struct pollfd {
 extern int poll(struct pollfd *fds, unsigned long nfds, int timeout);
 #endif
 
+#define APP_MAX_DIRTY_RECTS 32
+
 struct NovaApp {
     int fd;
     uint32_t surf_id;
@@ -50,7 +52,14 @@ struct NovaApp {
 
     // Flags
     bool dirty;       // redraw requested
+    bool full_dirty;
+    bool drawing;
     bool running;
+    NovaRect dirty_rects[APP_MAX_DIRTY_RECTS];
+    int dirty_rect_count;
+    NovaRect next_dirty_rects[APP_MAX_DIRTY_RECTS];
+    int next_dirty_rect_count;
+    bool next_full_dirty;
 };
 
 #define NORMAL_LAYER 1
@@ -79,6 +88,71 @@ static void _damage_all(NovaApp *app) {
     nova_damage_surface(app->fd, app->surf_id, 1, &r);
 }
 
+static bool _clip_rect(NovaApp *app, int *x, int *y, int *w, int *h) {
+    if (!app || !x || !y || !w || !h || *w <= 0 || *h <= 0) return false;
+
+    int x1 = *x;
+    int y1 = *y;
+    int x2 = *x + *w;
+    int y2 = *y + *h;
+
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > (int)app->width) x2 = (int)app->width;
+    if (y2 > (int)app->height) y2 = (int)app->height;
+    if (x2 <= x1 || y2 <= y1) return false;
+
+    *x = x1;
+    *y = y1;
+    *w = x2 - x1;
+    *h = y2 - y1;
+    return true;
+}
+
+static void _add_dirty_rect(NovaRect *rects, int *count, int x, int y, int w, int h) {
+    if (!rects || !count || w <= 0 || h <= 0) return;
+
+    if (*count >= APP_MAX_DIRTY_RECTS) {
+        int x1 = rects[0].x;
+        int y1 = rects[0].y;
+        int x2 = rects[0].x + (int)rects[0].w;
+        int y2 = rects[0].y + (int)rects[0].h;
+
+        if (x < x1) x1 = x;
+        if (y < y1) y1 = y;
+        if (x + w > x2) x2 = x + w;
+        if (y + h > y2) y2 = y + h;
+
+        rects[0].x = x1;
+        rects[0].y = y1;
+        rects[0].w = (uint32_t)(x2 - x1);
+        rects[0].h = (uint32_t)(y2 - y1);
+        *count = 1;
+        return;
+    }
+
+    rects[*count].x = x;
+    rects[*count].y = y;
+    rects[*count].w = (uint32_t)w;
+    rects[*count].h = (uint32_t)h;
+    (*count)++;
+}
+
+static void _clear_next_dirty(NovaApp *app) {
+    app->next_dirty_rect_count = 0;
+    app->next_full_dirty = false;
+}
+
+static void _damage_dirty(NovaApp *app) {
+    if (app->full_dirty || app->dirty_rect_count <= 0) {
+        _damage_all(app);
+        return;
+    }
+
+    nova_damage_surface(app->fd, app->surf_id,
+                        app->dirty_rect_count, app->dirty_rects);
+}
+
 static bool _socket_readable(struct pollfd *pfd) {
     if (!pfd) return false;
 
@@ -91,6 +165,7 @@ static void _do_draw(NovaApp *app) {
     if (!app->pixels) return;
 
     app->dirty = false;
+    app->drawing = true;
 
     // Fill with theme background using a tight pointer loop.
     uint32_t  bg  = app->theme.panel_bg;
@@ -102,7 +177,23 @@ static void _do_draw(NovaApp *app) {
         app->cb_draw(app);
     }
 
-    _damage_all(app);
+    app->drawing = false;
+    bool redraw_again = app->dirty;
+
+    _damage_dirty(app);
+
+    app->full_dirty = app->next_full_dirty;
+    app->dirty_rect_count = app->next_dirty_rect_count;
+    if (app->next_dirty_rect_count > 0) {
+        memcpy(app->dirty_rects, app->next_dirty_rects,
+               (size_t)app->next_dirty_rect_count * sizeof(NovaRect));
+    }
+    _clear_next_dirty(app);
+
+    if (!redraw_again) {
+        app->full_dirty = false;
+        app->dirty_rect_count = 0;
+    }
 }
 
 static bool _handle_resize(NovaApp *app, uint32_t new_w, uint32_t new_h) {
@@ -121,6 +212,7 @@ static bool _handle_resize(NovaApp *app, uint32_t new_w, uint32_t new_h) {
     if (!_map_shm(app, new_w, new_h, new_path)) return false;
 
     app->dirty = true;
+    app->full_dirty = true;
     return true;
 }
 
@@ -132,6 +224,7 @@ NovaApp *app_create(const char *title, uint32_t width, uint32_t height) {
     app->height  = height;
     app->running = true;
     app->dirty   = true;
+    app->full_dirty = true;
 
     // Load system theme
     theme_load("/etc/nova/nova.conf", &app->theme);
@@ -264,6 +357,7 @@ int app_run(NovaApp *app) {
                         ui_font_init(app->theme.font_path,
                                      app->theme.font_size);
                         app->dirty = true;
+                        app->full_dirty = true;
                         break;
                     }
 
@@ -282,7 +376,25 @@ int app_run(NovaApp *app) {
 }
 
 void app_request_redraw(NovaApp *app) {
-    if (app) app->dirty = true;
+    if (!app) return;
+    app->dirty = true;
+    if (app->drawing) {
+        app->full_dirty = true;
+        app->next_full_dirty = true;
+    } else {
+        app->full_dirty = true;
+    }
+}
+
+void app_request_redraw_rect(NovaApp *app, int x, int y, int w, int h) {
+    if (!app || !_clip_rect(app, &x, &y, &w, &h)) return;
+
+    app->dirty = true;
+    _add_dirty_rect(app->dirty_rects, &app->dirty_rect_count, x, y, w, h);
+    if (app->drawing) {
+        _add_dirty_rect(app->next_dirty_rects, &app->next_dirty_rect_count,
+                        x, y, w, h);
+    }
 }
 
 // Callback registration

@@ -15,6 +15,7 @@
 #include <syscall.h>
 #include <signal.h>
 #include <math.h>
+#include "utf-8.h"
 #include "libtheme/theme.h"
 #include "libui/ui.h"
 #include "libnovaproto/novaproto.h"
@@ -36,16 +37,84 @@
 
 // Autostart configuration items
 typedef struct {
-    char path[128];
+    char path[160];
+    char args[256];
     char name[32];
     int pid;
     bool respawn;
+    bool respawn_explicit;
     int retry_count;
     uint32_t respawn_at_ms;
 } autostart_t;
 
 static autostart_t autostarts[8];
 static int autostart_count = 0;
+
+typedef struct __attribute__((packed)) {
+    uint16_t keycode;
+    uint32_t codepoint;
+    uint32_t modifiers;
+    uint8_t pressed;
+    uint8_t repeat;
+    uint8_t is_text;
+} boredos_keyboard_event_t;
+
+typedef enum {
+    BKEY_NONE = 0,
+    BKEY_ESC,
+    BKEY_1, BKEY_2, BKEY_3, BKEY_4, BKEY_5, BKEY_6, BKEY_7, BKEY_8, BKEY_9, BKEY_0,
+    BKEY_MINUS,
+    BKEY_EQUAL,
+    BKEY_BACKSPACE,
+    BKEY_TAB,
+    BKEY_Q, BKEY_W, BKEY_E, BKEY_R, BKEY_T, BKEY_Y, BKEY_U, BKEY_I, BKEY_O, BKEY_P,
+    BKEY_LBRACKET,
+    BKEY_RBRACKET,
+    BKEY_ENTER,
+    BKEY_LEFT_CTRL,
+    BKEY_A, BKEY_S, BKEY_D, BKEY_F, BKEY_G, BKEY_H, BKEY_J, BKEY_K, BKEY_L,
+    BKEY_SEMICOLON,
+    BKEY_APOSTROPHE,
+    BKEY_GRAVE,
+    BKEY_LEFT_SHIFT,
+    BKEY_BACKSLASH,
+    BKEY_Z, BKEY_X, BKEY_C, BKEY_V, BKEY_B, BKEY_N, BKEY_M,
+    BKEY_COMMA,
+    BKEY_DOT,
+    BKEY_SLASH,
+    BKEY_RIGHT_SHIFT,
+    BKEY_KP_STAR,
+    BKEY_LEFT_ALT,
+    BKEY_SPACE,
+    BKEY_CAPS_LOCK,
+    BKEY_F1, BKEY_F2, BKEY_F3, BKEY_F4, BKEY_F5, BKEY_F6,
+    BKEY_F7, BKEY_F8, BKEY_F9, BKEY_F10,
+    BKEY_NUM_LOCK,
+    BKEY_SCROLL_LOCK,
+    BKEY_KP_7, BKEY_KP_8, BKEY_KP_9,
+    BKEY_KP_MINUS,
+    BKEY_KP_4, BKEY_KP_5, BKEY_KP_6,
+    BKEY_KP_PLUS,
+    BKEY_KP_1, BKEY_KP_2, BKEY_KP_3,
+    BKEY_KP_0,
+    BKEY_KP_DOT,
+    BKEY_F11,
+    BKEY_F12,
+    BKEY_KP_ENTER,
+    BKEY_RIGHT_CTRL,
+    BKEY_KP_SLASH,
+    BKEY_RIGHT_ALT,
+    BKEY_HOME,
+    BKEY_ARROW_UP,
+    BKEY_PAGE_UP,
+    BKEY_ARROW_LEFT,
+    BKEY_ARROW_RIGHT,
+    BKEY_END,
+    BKEY_ARROW_DOWN,
+    BKEY_PAGE_DOWN,
+    BKEY_INSERT,
+    BKEY_DELETE,
+} BoredKeycode;
 
 // Surface represention
 typedef struct surface {
@@ -227,54 +296,202 @@ static const NovaKeycode scancode_to_novakey_ext[] = {
     [0x1C] = KEY_ENTER // Numpad Enter
 };
 
-// Autostart config INI parser
+static char *trim_config(char *str) {
+    while (*str && (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')) str++;
+    if (*str == '\0') return str;
+
+    char *end = str + strlen(str) - 1;
+    while (end >= str && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+        *end-- = '\0';
+    }
+    return str;
+}
+
+static bool streq_ci(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        char ca = *a++;
+        char cb = *b++;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return false;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool parse_bool_config(const char *val, bool fallback) {
+    if (streq_ci(val, "true") || streq_ci(val, "yes") || streq_ci(val, "on") || strcmp(val, "1") == 0) return true;
+    if (streq_ci(val, "false") || streq_ci(val, "no") || streq_ci(val, "off") || strcmp(val, "0") == 0) return false;
+    return fallback;
+}
+
+static int keyboard_layout_id_from_name(const char *name) {
+    if (streq_ci(name, "qwerty") || streq_ci(name, "us")) return 0;
+    if (streq_ci(name, "azerty") || streq_ci(name, "fr")) return 1;
+    if (streq_ci(name, "qwertz") || streq_ci(name, "de")) return 2;
+    if (streq_ci(name, "dvorak")) return 3;
+    return -1;
+}
+
+static void apply_keyboard_layout(const char *layout) {
+    int id = keyboard_layout_id_from_name(layout);
+    if (id < 0) {
+        printf("Compositor: Unknown keyboard layout '%s'\n", layout ? layout : "");
+        return;
+    }
+    sys_system(SYSTEM_CMD_SET_KEYBOARD_LAYOUT, (uint64_t)id, 0, 0, 0);
+    printf("Compositor: Keyboard layout set to %s (%d)\n", layout, id);
+}
+
+static autostart_t *find_or_create_autostart(const char *name, bool default_respawn) {
+    if (!name || !*name) return NULL;
+    for (int i = 0; i < autostart_count; i++) {
+        if (strcmp(autostarts[i].name, name) == 0) {
+            return &autostarts[i];
+        }
+    }
+    if (autostart_count >= (int)(sizeof(autostarts) / sizeof(autostarts[0]))) {
+        return NULL;
+    }
+
+    autostart_t *item = &autostarts[autostart_count++];
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, name, sizeof(item->name) - 1);
+    item->respawn = default_respawn;
+    return item;
+}
+
+static void resolve_command_path(const char *cmd, char *out, size_t out_size) {
+    if (!cmd || !*cmd || !out || out_size == 0) return;
+
+    out[0] = '\0';
+    if (cmd[0] == '/') {
+        strncpy(out, cmd, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    if (sys_exists(cmd)) {
+        strncpy(out, cmd, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    char candidate[160];
+    snprintf(candidate, sizeof(candidate), "/bin/%s", cmd);
+    if (sys_exists(candidate)) {
+        strncpy(out, candidate, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    snprintf(candidate, sizeof(candidate), "/bin/%s.elf", cmd);
+    strncpy(out, candidate, out_size - 1);
+    out[out_size - 1] = '\0';
+}
+
+static void configure_autostart_command(autostart_t *item, const char *command) {
+    if (!item || !command) return;
+
+    char buf[256];
+    strncpy(buf, command, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *cmd = trim_config(buf);
+    if (*cmd == '\0') return;
+
+    char *args = cmd;
+    while (*args && *args != ' ' && *args != '\t') args++;
+    if (*args) {
+        *args++ = '\0';
+        args = trim_config(args);
+    }
+
+    resolve_command_path(cmd, item->path, sizeof(item->path));
+    if (args && *args) {
+        strncpy(item->args, args, sizeof(item->args) - 1);
+        item->args[sizeof(item->args) - 1] = '\0';
+    } else {
+        item->args[0] = '\0';
+    }
+}
+
+// Nova config INI parser
 void load_nova_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return;
 
+    autostart_count = 0;
+    bool default_autostart_respawn = true;
+    char section[32] = "";
     char line[256];
+
     while (fgets(line, sizeof(line), f)) {
-        char *start = line;
-        while (*start && (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')) start++;
+        char *start = trim_config(line);
         if (*start == '\0' || *start == ';' || *start == '#') continue;
 
-        if (*start == '[') continue;
+        if (*start == '[') {
+            char *end = strchr(start, ']');
+            if (!end) continue;
+            *end = '\0';
+            strncpy(section, trim_config(start + 1), sizeof(section) - 1);
+            section[sizeof(section) - 1] = '\0';
+            continue;
+        }
 
         char *eq = strchr(start, '=');
         if (!eq) continue;
         *eq = '\0';
-        char *key = start;
-        char *val = eq + 1;
+        char *key = trim_config(start);
+        char *val = trim_config(eq + 1);
 
-        char *key_end = key + strlen(key) - 1;
-        while (key_end >= key && (*key_end == ' ' || *key_end == '\t')) *key_end-- = '\0';
-
-        while (*val && (*val == ' ' || *val == '\t')) val++;
-        char *val_end = val + strlen(val) - 1;
-        while (val_end >= val && (*val_end == ' ' || *val_end == '\t' || *val_end == '\r' || *val_end == '\n')) *val_end-- = '\0';
-
-        if (strcmp(key, "active_titlebar_top") == 0) {
-            active_titlebar_top = theme_resolve_color(val, active_titlebar_top);
-        } else if (strcmp(key, "active_titlebar_bottom") == 0) {
-            active_titlebar_bottom = theme_resolve_color(val, active_titlebar_bottom);
-        } else if (strcmp(key, "inactive_titlebar_top") == 0) {
-            inactive_titlebar_top = theme_resolve_color(val, inactive_titlebar_top);
-        } else if (strcmp(key, "inactive_titlebar_bottom") == 0) {
-            inactive_titlebar_bottom = theme_resolve_color(val, inactive_titlebar_bottom);
-        } else if (strcmp(key, "active_border") == 0) {
-            active_border = theme_resolve_color(val, active_border);
-        } else if (strcmp(key, "inactive_border") == 0) {
-            inactive_border = theme_resolve_color(val, inactive_border);
-        } else if (strcmp(key, "shelf") == 0 || strcmp(key, "topbar") == 0 || strcmp(key, "taskbar") == 0 || strcmp(key, "wallpaperd") == 0) {
-            if (autostart_count < 8) {
-                strncpy(autostarts[autostart_count].path, val, sizeof(autostarts[autostart_count].path) - 1);
-                strncpy(autostarts[autostart_count].name, key, sizeof(autostarts[autostart_count].name) - 1);
-                autostarts[autostart_count].pid = 0;
-                autostarts[autostart_count].respawn = true;
-                autostarts[autostart_count].retry_count = 0;
-                autostarts[autostart_count].respawn_at_ms = 0;
-                autostart_count++;
+        if (section[0] == '\0' || streq_ci(section, "theme")) {
+            if (strcmp(key, "active_titlebar_top") == 0) {
+                active_titlebar_top = theme_resolve_color(val, active_titlebar_top);
+            } else if (strcmp(key, "active_titlebar_bottom") == 0) {
+                active_titlebar_bottom = theme_resolve_color(val, active_titlebar_bottom);
+            } else if (strcmp(key, "inactive_titlebar_top") == 0) {
+                inactive_titlebar_top = theme_resolve_color(val, inactive_titlebar_top);
+            } else if (strcmp(key, "inactive_titlebar_bottom") == 0) {
+                inactive_titlebar_bottom = theme_resolve_color(val, inactive_titlebar_bottom);
+            } else if (strcmp(key, "active_border") == 0) {
+                active_border = theme_resolve_color(val, active_border);
+            } else if (strcmp(key, "inactive_border") == 0) {
+                inactive_border = theme_resolve_color(val, inactive_border);
             }
+        }
+
+        if (streq_ci(section, "keyboard")) {
+            if (strcmp(key, "layout") == 0) {
+                apply_keyboard_layout(val);
+            }
+            continue;
+        }
+
+        if (streq_ci(section, "autostart")) {
+            if (strcmp(key, "respawn") == 0) {
+                default_autostart_respawn = parse_bool_config(val, default_autostart_respawn);
+                for (int i = 0; i < autostart_count; i++) {
+                    if (!autostarts[i].respawn_explicit) {
+                        autostarts[i].respawn = default_autostart_respawn;
+                    }
+                }
+                continue;
+            }
+
+            char *dot = strchr(key, '.');
+            if (dot && strcmp(dot + 1, "respawn") == 0) {
+                *dot = '\0';
+                autostart_t *item = find_or_create_autostart(key, default_autostart_respawn);
+                if (item) {
+                    item->respawn = parse_bool_config(val, item->respawn);
+                    item->respawn_explicit = true;
+                }
+                continue;
+            }
+
+            autostart_t *item = find_or_create_autostart(key, default_autostart_respawn);
+            configure_autostart_command(item, val);
         }
     }
     fclose(f);
@@ -384,6 +601,100 @@ static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
     };
 
     return send_frame(surf->client_fd, EVT_POINTER, surf->surface_id, &pl, sizeof(pl)) == 0;
+}
+
+static NovaKeycode map_boredos_keycode(uint16_t keycode) {
+    switch (keycode) {
+        case BKEY_A:           return KEY_A;
+        case BKEY_B:           return KEY_B;
+        case BKEY_C:           return KEY_C;
+        case BKEY_D:           return KEY_D;
+        case BKEY_E:           return KEY_E;
+        case BKEY_F:           return KEY_F;
+        case BKEY_G:           return KEY_G;
+        case BKEY_H:           return KEY_H;
+        case BKEY_I:           return KEY_I;
+        case BKEY_J:           return KEY_J;
+        case BKEY_K:           return KEY_K;
+        case BKEY_L:           return KEY_L;
+        case BKEY_M:           return KEY_M;
+        case BKEY_N:           return KEY_N;
+        case BKEY_O:           return KEY_O;
+        case BKEY_P:           return KEY_P;
+        case BKEY_Q:           return KEY_Q;
+        case BKEY_R:           return KEY_R;
+        case BKEY_S:           return KEY_S;
+        case BKEY_T:           return KEY_T;
+        case BKEY_U:           return KEY_U;
+        case BKEY_V:           return KEY_V;
+        case BKEY_W:           return KEY_W;
+        case BKEY_X:           return KEY_X;
+        case BKEY_Y:           return KEY_Y;
+        case BKEY_Z:           return KEY_Z;
+        case BKEY_0:           return KEY_0;
+        case BKEY_1:           return KEY_1;
+        case BKEY_2:           return KEY_2;
+        case BKEY_3:           return KEY_3;
+        case BKEY_4:           return KEY_4;
+        case BKEY_5:           return KEY_5;
+        case BKEY_6:           return KEY_6;
+        case BKEY_7:           return KEY_7;
+        case BKEY_8:           return KEY_8;
+        case BKEY_9:           return KEY_9;
+        case BKEY_ESC:         return KEY_ESCAPE;
+        case BKEY_BACKSPACE:   return KEY_BACKSPACE;
+        case BKEY_TAB:         return KEY_TAB;
+        case BKEY_ENTER:
+        case BKEY_KP_ENTER:    return KEY_ENTER;
+        case BKEY_SPACE:       return KEY_SPACE;
+        case BKEY_ARROW_LEFT:  return KEY_LEFT;
+        case BKEY_ARROW_RIGHT: return KEY_RIGHT;
+        case BKEY_ARROW_UP:    return KEY_UP;
+        case BKEY_ARROW_DOWN:  return KEY_DOWN;
+        case BKEY_LEFT_SHIFT:  return KEY_LSHIFT;
+        case BKEY_RIGHT_SHIFT: return KEY_RSHIFT;
+        case BKEY_LEFT_CTRL:   return KEY_LCTRL;
+        case BKEY_RIGHT_CTRL:  return KEY_RCTRL;
+        case BKEY_LEFT_ALT:    return KEY_LALT;
+        case BKEY_RIGHT_ALT:   return KEY_RALT;
+        default:               return KEY_UNKNOWN;
+    }
+}
+
+static bool send_key_event(surface_t *surf,
+                           NovaKeycode key,
+                           uint32_t modifiers,
+                           bool pressed,
+                           uint32_t codepoint) {
+    if (!surf || !surf->mapped) return false;
+    if (key == KEY_UNKNOWN && codepoint == 0) return false;
+
+    struct {
+        uint32_t surface_id;
+        uint32_t keycode;
+        uint32_t modifiers;
+        uint8_t pressed;
+        uint8_t text_len;
+        char text[5];
+        uint32_t codepoint;
+    } __attribute__((packed)) pl;
+
+    memset(&pl, 0, sizeof(pl));
+    pl.surface_id = surf->surface_id;
+    pl.keycode = key;
+    pl.modifiers = modifiers;
+    pl.pressed = pressed ? 1 : 0;
+    pl.codepoint = codepoint;
+
+    if (pressed && codepoint >= 32) {
+        int len = text_encode_utf8(codepoint, pl.text);
+        if (len > 0 && len <= 4) {
+            pl.text_len = (uint8_t)len;
+            pl.text[len] = '\0';
+        }
+    }
+
+    return send_frame(surf->client_fd, EVT_KEY, surf->surface_id, &pl, sizeof(pl)) == 0;
 }
 
 static uint32_t get_ticks_ms(void) {
@@ -886,14 +1197,17 @@ surface_t *surface_at(int px, int py, int *click_region_out) {
 
 // Autostart Spawner Engine
 void spawn_autostart(int idx) {
+    if (idx < 0 || idx >= autostart_count || autostarts[idx].path[0] == '\0') return;
+
+    const char *args = autostarts[idx].args[0] ? autostarts[idx].args : NULL;
     // Spawn using sys_spawn with terminal and tty-inheritance flags
-    int pid = sys_spawn(autostarts[idx].path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
+    int pid = sys_spawn(autostarts[idx].path, args, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
     if (pid > 0) {
         autostarts[idx].pid = pid;
         autostarts[idx].respawn_at_ms = 0;
         printf("Compositor: Autostart %s spawned (PID %d)\n", autostarts[idx].name, pid);
     } else {
-        printf("Compositor: Failed to spawn autostart %s\n", autostarts[idx].name);
+        printf("Compositor: Failed to spawn autostart %s (%s)\n", autostarts[idx].name, autostarts[idx].path);
         autostarts[idx].pid = 0;
         autostarts[idx].respawn_at_ms = 0;
     }
@@ -1862,7 +2176,11 @@ int main(int argc, char *argv[]) {
     }
 
     // Open Exclusive Inputs
-    int kbd_fd = open("/dev/keyboard", O_RDONLY | O_NONBLOCK);
+    int keyevent_fd = open("/dev/keyevent", O_RDONLY | O_NONBLOCK);
+    int kbd_fd = -1;
+    if (keyevent_fd < 0) {
+        kbd_fd = open("/dev/keyboard", O_RDONLY | O_NONBLOCK);
+    }
     int mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
     if (mouse_fd >= 0) {
         uint8_t dummy;
@@ -1917,7 +2235,16 @@ int main(int argc, char *argv[]) {
         // Collect fds for sys_poll
         int fd_idx = 0;
         
-        // 0. Keyboard device
+        // 0. Processed keyboard event device
+        if (keyevent_fd >= 0) {
+            poll_fds[fd_idx].fd = keyevent_fd;
+            poll_fds[fd_idx].events = POLLIN;
+            poll_fds[fd_idx].revents = 0;
+            client_surfaces[fd_idx] = NULL;
+            fd_idx++;
+        }
+
+        // 0b. Legacy raw keyboard device
         if (kbd_fd >= 0) {
             poll_fds[fd_idx].fd = kbd_fd;
             poll_fds[fd_idx].events = POLLIN;
@@ -1992,8 +2319,28 @@ int main(int argc, char *argv[]) {
 
         for (int i = 0; i < fd_idx; i++) {
             if (poll_fds[i].revents & POLLIN) {
-                // 0. Keyboard event
-                if (poll_fds[i].fd == kbd_fd) {
+                // 0. Processed keyboard event
+                if (poll_fds[i].fd == keyevent_fd) {
+                    boredos_keyboard_event_t ev;
+                    while (read(keyevent_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+                        NovaKeycode key = map_boredos_keycode(ev.keycode);
+
+                        if (ev.pressed && key == KEY_Q &&
+                            (ev.modifiers & 0x1) &&
+                            (ev.modifiers & 0x4)) {
+                            quit_loop = true;
+                        }
+
+                        surface_t *focused = surface_get_focused();
+                        if (!quit_loop && focused) {
+                            uint32_t codepoint = ev.is_text ? ev.codepoint : 0;
+                            send_key_event(focused, key, ev.modifiers, ev.pressed != 0, codepoint);
+                        }
+                    }
+                }
+
+                // 0b. Legacy raw keyboard event
+                else if (poll_fds[i].fd == kbd_fd) {
                     uint8_t scancode;
                     while (read(kbd_fd, &scancode, 1) == 1) {
                         if (scancode == 0xE0) {
@@ -2034,14 +2381,7 @@ int main(int argc, char *argv[]) {
                             if (ctrl_pressed) modifiers |= 0x2;
                             if (alt_pressed) modifiers |= 0x4;
 
-                            struct {
-                                uint32_t surface_id;
-                                uint32_t keycode;
-                                uint32_t modifiers;
-                                uint8_t pressed;
-                            } __attribute__((packed)) pl = {focused->surface_id, key, modifiers, pressed ? 1 : 0};
-
-                            send_frame(focused->client_fd, EVT_KEY, focused->surface_id, &pl, sizeof(pl));
+                            send_key_event(focused, key, modifiers, pressed, 0);
                         }
                     }
                 }
@@ -2412,6 +2752,9 @@ int main(int argc, char *argv[]) {
     }
 
     // Clean up
+    if (keyevent_fd >= 0) close(keyevent_fd);
+    if (kbd_fd >= 0) close(kbd_fd);
+    if (mouse_fd >= 0) close(mouse_fd);
     close(server_fd);
     unlink("/tmp/nova.sock");
     munmap(fb_mem, fb_size);

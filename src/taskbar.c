@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <syscall.h>
+#include "utf-8.h"
 #include "libtheme/theme.h"
 #include "libui/ui.h"
 #include "libnovaproto/novaproto.h"
@@ -627,6 +628,29 @@ static void apply_filter(void) {
     if (selected_idx < 0) selected_idx = 0;
 }
 
+static void search_backspace_utf8(void) {
+    if (search_len <= 0) return;
+
+    const char *prev = text_prev_utf8(search_buf, search_buf + search_len);
+    int prev_pos = (int)(prev - search_buf);
+    if (prev_pos < 0 || prev_pos >= search_len) {
+        prev_pos = search_len - 1;
+    }
+    search_len = prev_pos;
+    search_buf[search_len] = '\0';
+}
+
+static bool search_append_utf8(const char *text, uint8_t text_len) {
+    if (!text || text_len == 0) return false;
+    if (text_len > 4) text_len = 4;
+    if (search_len + text_len >= (int)sizeof(search_buf)) return false;
+
+    memcpy(search_buf + search_len, text, text_len);
+    search_len += text_len;
+    search_buf[search_len] = '\0';
+    return true;
+}
+
 static int get_approx_string_width(const char *str) {
     if (!str) return 0;
     int len = 0;
@@ -1040,31 +1064,12 @@ static void handle_menu_key(const NovaEvent *ev) {
         }
     } else if (kc == KEY_BACKSPACE) {
         if (search_len > 0) {
-            search_len--;
-            search_buf[search_len] = '\0';
+            search_backspace_utf8();
             apply_filter();
             draw_menu();
         }
-    } else if (kc == KEY_SPACE) {
-        if (search_len < (int)sizeof(search_buf) - 1) {
-            search_buf[search_len++] = ' ';
-            search_buf[search_len] = '\0';
-            apply_filter();
-            draw_menu();
-        }
-    } else if (kc >= KEY_A && kc <= KEY_Z) {
-        char letter = (char)('a' + (kc - KEY_A));
-        if (search_len < (int)sizeof(search_buf) - 1) {
-            search_buf[search_len++] = letter;
-            search_buf[search_len] = '\0';
-            apply_filter();
-            draw_menu();
-        }
-    } else if (kc >= KEY_0 && kc <= KEY_9) {
-        char digit = (char)('0' + (kc - KEY_0));
-        if (search_len < (int)sizeof(search_buf) - 1) {
-            search_buf[search_len++] = digit;
-            search_buf[search_len] = '\0';
+    } else if (ev->data.key.text_len > 0) {
+        if (search_append_utf8(ev->data.key.text, ev->data.key.text_len)) {
             apply_filter();
             draw_menu();
         }

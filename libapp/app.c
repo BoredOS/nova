@@ -45,6 +45,7 @@ struct NovaApp {
     // User callbacks
     AppDrawCallback cb_draw;
     AppKeyCallback cb_key;
+    AppTextCallback cb_text;
     AppPointerCallback cb_pointer;
     AppCloseCallback cb_close;
 
@@ -339,6 +340,13 @@ int app_run(NovaApp *app) {
                                         ev.data.key.modifiers,
                                         ev.data.key.pressed);
                         }
+                        if (ev.data.key.pressed &&
+                            ev.data.key.text_len > 0 &&
+                            app->cb_text) {
+                            app->cb_text(app,
+                                         ev.data.key.text,
+                                         ev.data.key.codepoint);
+                        }
                         break;
                     }
 
@@ -404,6 +412,10 @@ void app_on_draw(NovaApp *app, AppDrawCallback cb) {
 
 void app_on_key(NovaApp *app, AppKeyCallback cb) {
     if (app) app->cb_key = cb;
+}
+
+void app_on_text(NovaApp *app, AppTextCallback cb) {
+    if (app) app->cb_text = cb;
 }
 
 void app_on_pointer(NovaApp *app, AppPointerCallback cb) {

@@ -170,13 +170,134 @@ void ui_draw_panel(uint32_t *buffer, int w, int h, int x, int y, int rw, int rh,
     }
 }
 
-// Baked Font Atlas state
-#define ATLAS_W 512
-#define ATLAS_H 512
-static unsigned char *g_font_atlas = NULL;
-static stbtt_bakedchar g_chardata[96];
+// Dynamic font state. Glyphs are rasterized on demand so UTF-8 text is not
+// limited to the initial ASCII atlas.
+#define GLYPH_CACHE_SIZE 256
+typedef struct {
+    uint32_t codepoint;
+    unsigned char *bitmap;
+    int w, h;
+    int xoff, yoff;
+    int xadvance;
+    bool valid;
+} glyph_cache_entry_t;
+
+static unsigned char *g_ttf_buffer = NULL;
+static stbtt_fontinfo g_font_info;
+static glyph_cache_entry_t g_glyph_cache[GLYPH_CACHE_SIZE];
+static int g_glyph_cache_next = 0;
 static bool g_font_initialized = false;
 static int g_baked_font_size = 13;
+static float g_font_scale = 1.0f;
+static int g_font_ascent = 0;
+
+static void clear_glyph_cache(void) {
+    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+        if (g_glyph_cache[i].bitmap) {
+            stbtt_FreeBitmap(g_glyph_cache[i].bitmap, NULL);
+        }
+        memset(&g_glyph_cache[i], 0, sizeof(g_glyph_cache[i]));
+    }
+    g_glyph_cache_next = 0;
+}
+
+static uint32_t decode_utf8_char(const char *s, int remaining, int *advance) {
+    const unsigned char *p = (const unsigned char *)s;
+    if (!s || remaining <= 0 || p[0] == '\0') {
+        if (advance) *advance = 0;
+        return 0;
+    }
+
+    if (p[0] < 0x80) {
+        if (advance) *advance = 1;
+        return p[0];
+    }
+
+    if ((p[0] & 0xE0) == 0xC0 && remaining >= 2 &&
+        (p[1] & 0xC0) == 0x80) {
+        uint32_t cp = ((uint32_t)(p[0] & 0x1F) << 6) |
+                      (uint32_t)(p[1] & 0x3F);
+        if (cp >= 0x80) {
+            if (advance) *advance = 2;
+            return cp;
+        }
+    }
+
+    if ((p[0] & 0xF0) == 0xE0 && remaining >= 3 &&
+        (p[1] & 0xC0) == 0x80 &&
+        (p[2] & 0xC0) == 0x80) {
+        uint32_t cp = ((uint32_t)(p[0] & 0x0F) << 12) |
+                      ((uint32_t)(p[1] & 0x3F) << 6) |
+                      (uint32_t)(p[2] & 0x3F);
+        if (cp >= 0x800 && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+            if (advance) *advance = 3;
+            return cp;
+        }
+    }
+
+    if ((p[0] & 0xF8) == 0xF0 && remaining >= 4 &&
+        (p[1] & 0xC0) == 0x80 &&
+        (p[2] & 0xC0) == 0x80 &&
+        (p[3] & 0xC0) == 0x80) {
+        uint32_t cp = ((uint32_t)(p[0] & 0x07) << 18) |
+                      ((uint32_t)(p[1] & 0x3F) << 12) |
+                      ((uint32_t)(p[2] & 0x3F) << 6) |
+                      (uint32_t)(p[3] & 0x3F);
+        if (cp >= 0x10000 && cp <= 0x10FFFF) {
+            if (advance) *advance = 4;
+            return cp;
+        }
+    }
+
+    if (advance) *advance = 1;
+    return 0xFFFD;
+}
+
+static glyph_cache_entry_t *get_glyph(uint32_t cp) {
+    if (!g_font_initialized) return NULL;
+    if (cp == 0) return NULL;
+
+    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+        if (g_glyph_cache[i].valid && g_glyph_cache[i].codepoint == cp) {
+            return &g_glyph_cache[i];
+        }
+    }
+
+    uint32_t render_cp = cp;
+    if (render_cp != ' ' && stbtt_FindGlyphIndex(&g_font_info, (int)render_cp) == 0) {
+        render_cp = '?';
+    }
+
+    glyph_cache_entry_t *entry = &g_glyph_cache[g_glyph_cache_next];
+    g_glyph_cache_next = (g_glyph_cache_next + 1) % GLYPH_CACHE_SIZE;
+
+    if (entry->bitmap) {
+        stbtt_FreeBitmap(entry->bitmap, NULL);
+    }
+    memset(entry, 0, sizeof(*entry));
+
+    int advance = 0;
+    int lsb = 0;
+    stbtt_GetCodepointHMetrics(&g_font_info, (int)render_cp, &advance, &lsb);
+
+    entry->codepoint = cp;
+    entry->xadvance = (int)((float)advance * g_font_scale + 0.5f);
+    if (entry->xadvance <= 0) entry->xadvance = g_baked_font_size / 2;
+    entry->valid = true;
+
+    if (render_cp != ' ') {
+        entry->bitmap = stbtt_GetCodepointBitmap(&g_font_info,
+                                                 0,
+                                                 g_font_scale,
+                                                 (int)render_cp,
+                                                 &entry->w,
+                                                 &entry->h,
+                                                 &entry->xoff,
+                                                 &entry->yoff);
+    }
+
+    return entry;
+}
 
 int ui_font_init(const char *font_path, int font_size) {
     const char *path = font_path;
@@ -199,23 +320,30 @@ int ui_font_init(const char *font_path, int font_size) {
         return -1;
     }
 
-    if (fread(ttf_buffer, 1, size, f) != size) {
+    if (fread(ttf_buffer, 1, (size_t)size, f) != (size_t)size) {
         free(ttf_buffer);
         fclose(f);
         return -1;
     }
     fclose(f);
 
-    if (g_font_atlas) free(g_font_atlas);
-    g_font_atlas = malloc(ATLAS_W * ATLAS_H);
-    if (!g_font_atlas) {
+    clear_glyph_cache();
+    if (g_ttf_buffer) {
+        free(g_ttf_buffer);
+        g_ttf_buffer = NULL;
+    }
+
+    g_ttf_buffer = ttf_buffer;
+    if (!stbtt_InitFont(&g_font_info, g_ttf_buffer, 0)) {
         free(ttf_buffer);
+        g_ttf_buffer = NULL;
         return -1;
     }
 
-    // Bake Inter outline font directly into a sharp alpha-map atlas
-    stbtt_BakeFontBitmap(ttf_buffer, 0, (float)font_size, g_font_atlas, ATLAS_W, ATLAS_H, 32, 96, g_chardata);
-    free(ttf_buffer);
+    int descent = 0;
+    int line_gap = 0;
+    stbtt_GetFontVMetrics(&g_font_info, &g_font_ascent, &descent, &line_gap);
+    g_font_scale = stbtt_ScaleForPixelHeight(&g_font_info, (float)font_size);
 
     g_font_initialized = true;
     g_baked_font_size = font_size;
@@ -223,22 +351,33 @@ int ui_font_init(const char *font_path, int font_size) {
 }
 
 void ui_font_shutdown(void) {
-    if (g_font_atlas) {
-        free(g_font_atlas);
-        g_font_atlas = NULL;
+    clear_glyph_cache();
+    if (g_ttf_buffer) {
+        free(g_ttf_buffer);
+        g_ttf_buffer = NULL;
     }
     g_font_initialized = false;
     g_baked_font_size = 13;
+    g_font_scale = 1.0f;
+    g_font_ascent = 0;
 }
 
 int ui_text_width(const char *text) {
     if (!g_font_initialized || !text) return 0;
 
     int width = 0;
-    while (*text) {
-        char c = *text++;
-        if (c < 32 || c > 126) continue;
-        width += g_chardata[c - 32].xadvance;
+    int remaining = (int)strlen(text);
+    const char *p = text;
+    while (remaining > 0 && *p) {
+        int adv = 0;
+        uint32_t cp = decode_utf8_char(p, remaining, &adv);
+        if (adv <= 0) break;
+        if (cp >= 32) {
+            glyph_cache_entry_t *g = get_glyph(cp);
+            if (g) width += g->xadvance;
+        }
+        p += adv;
+        remaining -= adv;
     }
     return width;
 }
@@ -247,10 +386,20 @@ int ui_text_width_n(const char *text, int n) {
     if (!g_font_initialized || !text || n <= 0) return 0;
 
     int width = 0;
-    for (int i = 0; i < n && text[i]; i++) {
-        char c = text[i];
-        if (c < 32 || c > 126) continue;
-        width += g_chardata[c - 32].xadvance;
+    int total_len = (int)strlen(text);
+    if (n > total_len) n = total_len;
+    const char *p = text;
+    int remaining = n;
+    while (remaining > 0 && *p) {
+        int adv = 0;
+        uint32_t cp = decode_utf8_char(p, remaining, &adv);
+        if (adv <= 0 || adv > remaining) break;
+        if (cp >= 32) {
+            glyph_cache_entry_t *g = get_glyph(cp);
+            if (g) width += g->xadvance;
+        }
+        p += adv;
+        remaining -= adv;
     }
     return width;
 }
@@ -264,42 +413,43 @@ void ui_draw_text(uint32_t *buffer, int w, int h, int x, int y,
     uint32_t src_b = color & 0xFF;
     uint32_t src_a = (color >> 24) & 0xFF;
 
-    float fx = (float)x;
-    float fy = (float)y;
+    int pen_x = x;
+    int baseline_y = y + (int)((float)g_font_ascent * g_font_scale + 0.5f);
 
-    // Shift font vertically to match the baseline alignment correctly
-    fy += (float)g_baked_font_size * 0.85f;
+    int remaining = (int)strlen(text);
+    const char *p = text;
 
-    while (*text) {
-        char c = *text++;
-        if (c < 32 || c > 126) continue;
+    while (remaining > 0 && *p) {
+        int adv = 0;
+        uint32_t cp = decode_utf8_char(p, remaining, &adv);
+        if (adv <= 0) break;
+        p += adv;
+        remaining -= adv;
 
-        stbtt_bakedchar *bc = &g_chardata[c - 32];
-        
-        int x0 = bc->x0;
-        int y0 = bc->y0;
-        int x1 = bc->x1;
-        int y1 = bc->y1;
+        if (cp < 32) continue;
 
-        int gw = x1 - x0;
-        int gh = y1 - y0;
+        glyph_cache_entry_t *glyph = get_glyph(cp);
+        if (!glyph) continue;
 
-        int dx = (int)(fx + bc->xoff + 0.5f);
-        int dy = (int)(fy + bc->yoff + 0.5f);
+        int gw = glyph->w;
+        int gh = glyph->h;
+        int dx = pen_x + glyph->xoff;
+        int dy = baseline_y + glyph->yoff;
 
-        // Blit glyph from baked font atlas to 32-bit ARGB target canvas
+        // Blit the cached glyph bitmap to the 32-bit ARGB target canvas.
         for (int gy = 0; gy < gh; gy++) {
             int ty = dy + gy;
             if (ty < 0 || ty >= h) continue;
 
             uint32_t *row = &buffer[ty * w];
-            const unsigned char *atlas_row = &g_font_atlas[(y0 + gy) * ATLAS_W + x0];
+            const unsigned char *glyph_row = glyph->bitmap ? &glyph->bitmap[gy * gw] : NULL;
+            if (!glyph_row) continue;
 
             for (int gx = 0; gx < gw; gx++) {
                 int tx = dx + gx;
                 if (tx < 0 || tx >= w) continue;
 
-                uint32_t alpha = atlas_row[gx] * src_a / 255;
+                uint32_t alpha = glyph_row[gx] * src_a / 255;
                 if (alpha == 0) continue;
 
                 if (alpha == 255) {
@@ -324,7 +474,7 @@ void ui_draw_text(uint32_t *buffer, int w, int h, int x, int y,
             }
         }
 
-        fx += bc->xadvance;
+        pen_x += glyph->xadvance;
     }
 }
 
@@ -340,4 +490,3 @@ void ui_draw_text_centered(uint32_t *buffer, int w, int h, int y,
     int x = (w - text_width) / 2;
     ui_draw_text(buffer, w, h, x, y, text, color);
 }
-

@@ -6,6 +6,7 @@
 #include "libapp/app.h"
 #include "libui/ui.h"
 #include "libnovaproto/novaproto.h"
+#include "utf-8.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,9 @@ typedef struct {
 typedef struct {
     uint32_t code;
     uint32_t mods;
+    uint32_t codepoint;
+    uint8_t text_len;
+    char text[5];
 } KeyPress;
 
 typedef struct {
@@ -184,34 +188,36 @@ static void _cb_key(NovaApp *app, uint32_t keycode, uint32_t modifiers, bool pre
     if (!pressed) return;
     WCtx *ctx = _ctx_for_app(app);
     if (!ctx) return;
+    if (keycode == KEY_UNKNOWN) return;
 
     if (ctx->key_count < WCTX_MAX_KEYS) {
         ctx->keys[ctx->key_count].code = keycode;
         ctx->keys[ctx->key_count].mods = modifiers;
+        ctx->keys[ctx->key_count].codepoint = 0;
+        ctx->keys[ctx->key_count].text_len = 0;
+        ctx->keys[ctx->key_count].text[0] = '\0';
         ctx->key_count++;
     }
     _request_hit_rect_redraw(ctx, ctx->focus_id);
 }
 
-static char _key_to_char(uint32_t kc, uint32_t mods) {
-    bool shift = (mods & 0x1) != 0;
+static void _cb_text(NovaApp *app, const char *text, uint32_t codepoint) {
+    WCtx *ctx = _ctx_for_app(app);
+    if (!ctx || !text || !*text) return;
 
-    // Letters: KEY_A=1 .. KEY_Z=26
-    if (kc >= KEY_A && kc <= KEY_Z) {
-        char base = (char)('a' + (int)(kc - KEY_A));
-        return shift ? (char)(base - 32) : base;
+    if (ctx->key_count < WCTX_MAX_KEYS) {
+        KeyPress *kp = &ctx->keys[ctx->key_count++];
+        kp->code = KEY_UNKNOWN;
+        kp->mods = 0;
+        kp->codepoint = codepoint;
+        kp->text_len = 0;
+        while (kp->text_len < 4 && text[kp->text_len]) {
+            kp->text[kp->text_len] = text[kp->text_len];
+            kp->text_len++;
+        }
+        kp->text[kp->text_len] = '\0';
     }
-
-    // Digits: KEY_0=27 .. KEY_9=36
-    if (kc >= KEY_0 && kc <= KEY_9) {
-        if (!shift) return (char)('0' + (int)(kc - KEY_0));
-        static const char shift_sym[] = ")!@#$%^&*(";
-        return shift_sym[kc - KEY_0];
-    }
-
-    if (kc == KEY_SPACE)    return ' ';
-
-    return '\0'; // non-printable
+    _request_hit_rect_redraw(ctx, ctx->focus_id);
 }
 
 static bool _hit(WCtx *ctx, int x, int y, int w, int h) {
@@ -288,6 +294,7 @@ WCtx *wctx_create(NovaApp *app) {
 
     app_on_pointer(app, _cb_pointer);
     app_on_key(app, _cb_key);
+    app_on_text(app, _cb_text);
     return ctx;
 }
 
@@ -686,33 +693,45 @@ bool widget_textinput(WCtx *ctx, int x, int y, int w, int h,
     bool entered = false;
     if (focused && ctx->key_count > 0) {
         for (int i = 0; i < ctx->key_count; i++) {
-            uint32_t kc   = ctx->keys[i].code;
-            uint32_t mods = ctx->keys[i].mods;
+            uint32_t kc = ctx->keys[i].code;
 
             if (kc == KEY_ENTER) {
                 entered = true;
             } else if (kc == KEY_BACKSPACE) {
                 if (ts->cursor > 0 && len > 0) {
-                    memmove(buf + ts->cursor - 1, buf + ts->cursor,
+                    const char *prev = text_prev_utf8(buf, buf + ts->cursor);
+                    int prev_pos = (int)(prev - buf);
+                    if (prev_pos < 0 || prev_pos >= ts->cursor) {
+                        prev_pos = ts->cursor - 1;
+                    }
+                    memmove(buf + prev_pos, buf + ts->cursor,
                             (size_t)(len - ts->cursor + 1));
-                    ts->cursor--;
-                    len--;
+                    len -= ts->cursor - prev_pos;
+                    ts->cursor = prev_pos;
                 }
             } else if (kc == KEY_LEFT) {
-                if (ts->cursor > 0) ts->cursor--;
+                if (ts->cursor > 0) {
+                    const char *prev = text_prev_utf8(buf, buf + ts->cursor);
+                    ts->cursor = (int)(prev - buf);
+                    if (ts->cursor < 0) ts->cursor = 0;
+                }
             } else if (kc == KEY_RIGHT) {
-                if (ts->cursor < len) ts->cursor++;
+                if (ts->cursor < len) {
+                    const char *next = text_next_utf8(buf + ts->cursor);
+                    ts->cursor = (int)(next - buf);
+                    if (ts->cursor > len) ts->cursor = len;
+                }
             } else if (kc == KEY_ESCAPE) {
                 ctx->focus_id = -1;
                 break;
             } else {
-                char ch = _key_to_char(kc, mods);
-                if (ch && len + 1 < (int)buf_size) {
-                    memmove(buf + ts->cursor + 1, buf + ts->cursor,
+                uint8_t text_len = ctx->keys[i].text_len;
+                if (text_len > 0 && len + text_len < (int)buf_size) {
+                    memmove(buf + ts->cursor + text_len, buf + ts->cursor,
                             (size_t)(len - ts->cursor + 1));
-                    buf[ts->cursor] = ch;
-                    ts->cursor++;
-                    len++;
+                    memcpy(buf + ts->cursor, ctx->keys[i].text, text_len);
+                    ts->cursor += text_len;
+                    len += text_len;
                 }
             }
         }

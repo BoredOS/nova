@@ -20,6 +20,9 @@ typedef void (*AppDrawCallback)(NovaApp *app);
 // Called when a keyboard key is pressed or released.
 typedef void (*AppKeyCallback)(NovaApp *app, uint32_t keycode, uint32_t modifiers, bool pressed);
 
+// Called when a pressed key produced UTF-8 text.
+typedef void (*AppTextCallback)(NovaApp *app, const char *text, uint32_t codepoint);
+
 // Called when the mouse moves or a button state changes.
 // x/y are relative to the top-left corner of the content area.
 typedef void (*AppPointerCallback)(NovaApp *app, int x, int y, uint32_t buttons);
@@ -49,6 +52,7 @@ void app_request_redraw_rect(NovaApp *app, int x, int y, int w, int h);
 
 void app_on_draw(NovaApp *app, AppDrawCallback cb);
 void app_on_key(NovaApp *app, AppKeyCallback cb);
+void app_on_text(NovaApp *app, AppTextCallback cb);
 void app_on_pointer(NovaApp *app, AppPointerCallback cb);
 void app_on_close(NovaApp *app, AppCloseCallback cb);
 

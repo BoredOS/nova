@@ -760,6 +760,17 @@ surface_t *surface_get_focused(void) {
 }
 
 // Send frame headers to socket clients
+static int send_all(int fd, const void *buf, size_t size) {
+    size_t written = 0;
+    while (written < size) {
+        ssize_t rc = send(fd, (const char *)buf + written, size - written, 0);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return -1;
+        written += (size_t)rc;
+    }
+    return 0;
+}
+
 static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *payload, uint32_t size) {
     (void)surface_id;
     NovaFrameHeader header;
@@ -769,14 +780,12 @@ static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *pa
     header.msg_type = type;
     header.payload_size = size;
 
-    // Send header
-    if (send(fd, &header, sizeof(header), 0) != sizeof(header)) {
+    if (send_all(fd, &header, sizeof(header)) < 0) {
         return -1;
     }
 
-    // Send payload
     if (size > 0 && payload) {
-        if (send(fd, payload, size, 0) != (ssize_t)size) {
+        if (send_all(fd, payload, size) < 0) {
             return -1;
         }
     }

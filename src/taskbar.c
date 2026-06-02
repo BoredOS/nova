@@ -114,6 +114,8 @@ static uint32_t resume_focus_id = 0;
 
 static uint32_t last_bar_click_ms = 0;
 static uint32_t last_menu_click_ms = 0;
+static uint32_t last_bar_buttons = 0;
+static uint32_t last_menu_buttons = 0;
 
 static int fd = -1;
 static uint32_t bar_surf_id = 0;
@@ -651,6 +653,14 @@ static bool search_append_utf8(const char *text, uint8_t text_len) {
     return true;
 }
 
+static bool socket_readable(struct pollfd *pfd) {
+    if (!pfd) return false;
+
+    pfd->revents = 0;
+    int pr = poll(pfd, 1, 0);
+    return pr > 0 && (pfd->revents & POLLIN);
+}
+
 static int get_approx_string_width(const char *str) {
     if (!str) return 0;
     int len = 0;
@@ -920,6 +930,7 @@ static void reset_menu_search(void) {
 static void close_menu(void) {
     if (!menu_open) return;
     menu_open = false;
+    last_menu_buttons = 0;
     if (menu_surf_id) {
         nova_set_state(fd, menu_surf_id, 0);
         nova_move_surface(fd, menu_surf_id, menu_hidden_x(), menu_hidden_y());
@@ -964,6 +975,7 @@ static void open_menu(void) {
     if (!ensure_menu_surface()) return;
 
     resume_focus_id = last_active_surface_id;
+    last_menu_buttons = 0;
     reset_menu_search();
     menu_open = true;
     nova_move_surface(fd, menu_surf_id, 0, menu_visible_y());
@@ -1153,6 +1165,9 @@ int main(int argc, char *argv[]) {
             timeout = 0;
         }
         int pr = poll(&pfd, 1, timeout);
+        if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
+            close_taskbar();
+        }
 
         uint32_t now = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
         if (now - last_clock_tick >= 1000) {
@@ -1163,7 +1178,7 @@ int main(int argc, char *argv[]) {
         if ((pr > 0 && (pfd.revents & POLLIN)) || nova_pending_events()) {
             NovaEvent ev;
             bool needs_draw = false;
-            while (nova_pending_events() || (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))) {
+            while (nova_pending_events() || socket_readable(&pfd)) {
                 if (nova_poll_event(fd, &ev) == 0) {
                     switch (ev.type) {
                         case EVT_WINDOW_CREATED:
@@ -1185,17 +1200,20 @@ int main(int argc, char *argv[]) {
                             break;
                         case EVT_POINTER: {
                             uint32_t buttons = ev.data.pointer.buttons;
-                            if (buttons & 1) {
-                                if (ev.surface_id == bar_surf_id) {
-                                    if (now - last_bar_click_ms > 80) {
-                                        last_bar_click_ms = now;
-                                        handle_bar_click(ev.data.pointer.x, ev.data.pointer.y);
-                                    }
-                                } else if (menu_open && ev.surface_id == menu_surf_id) {
-                                    if (now - last_menu_click_ms > 80) {
-                                        last_menu_click_ms = now;
-                                        handle_menu_click(ev.data.pointer.x, ev.data.pointer.y);
-                                    }
+                            bool left_pressed = (buttons & 1) != 0;
+                            if (ev.surface_id == bar_surf_id) {
+                                bool left_went_down = left_pressed && ((last_bar_buttons & 1) == 0);
+                                last_bar_buttons = buttons;
+                                if (left_went_down && now - last_bar_click_ms > 80) {
+                                    last_bar_click_ms = now;
+                                    handle_bar_click(ev.data.pointer.x, ev.data.pointer.y);
+                                }
+                            } else if (ev.surface_id == menu_surf_id) {
+                                bool left_went_down = left_pressed && ((last_menu_buttons & 1) == 0);
+                                last_menu_buttons = buttons;
+                                if (menu_open && left_went_down && now - last_menu_click_ms > 80) {
+                                    last_menu_click_ms = now;
+                                    handle_menu_click(ev.data.pointer.x, ev.data.pointer.y);
                                 }
                             }
                             break;
@@ -1214,7 +1232,7 @@ int main(int argc, char *argv[]) {
                             break;
                     }
                 } else {
-                    break;
+                    close_taskbar();
                 }
             }
             if (needs_draw) {

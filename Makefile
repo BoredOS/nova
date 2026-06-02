@@ -97,5 +97,30 @@ install: all
 	mkdir -p $(DESTDIR)/etc/nova
 	cp assets/nova.conf $(DESTDIR)/etc/nova/
 
+.PHONY: deps bup
+.PHONY: deps
+deps:
+	@if [ ! -d "external/libc" ]; then \
+		git clone https://github.com/boredos/libc.git external/libc; \
+	else \
+		echo "external/libc already present"; \
+	fi
+
+.PHONY: bup
+bup: all
+	@sh -c 'V=$$(sed -n '\''s/^#define NOVA_VERSION //p'\'' libnovaproto/novaproto.h); \
+	BUPNAME=nova-$$V.bup; \
+	echo "Assembling package $$BUPNAME..."; \
+	rm -rf build/package; \
+	mkdir -p build/package/bin build/package/lib build/package/assets build/package/config; \
+	cp -a pack/MANIFEST.toml build/package/; \
+	for f in $(APPS); do if [ -f "$$f" ]; then cp $$f build/package/bin/; fi; done; \
+	if [ -d assets ]; then cp -a assets/* build/package/config/; fi; \
+	if [ -f assets/nova.conf ]; then cp assets/nova.conf build/package/config/; fi; \
+	mkdir -p build; OUT=build/$$BUPNAME; \
+	tar --lz4 -C build/package -cf $$OUT MANIFEST.toml bin config; \
+	echo "Created $$OUT"; \
+	rm -rf build/package'
+
 clean:
 	rm -rf obj build $(APPS)

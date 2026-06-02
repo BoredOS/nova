@@ -1184,6 +1184,8 @@ int main(int argc, char *argv[]) {
                             break;
 
                         case EVT_WINDOW_DESTROYED:
+                            last_bar_buttons = 0;
+                            last_menu_buttons = 0;
                             remove_window(ev.surface_id);
                             needs_draw = true;
                             break;
@@ -1192,6 +1194,10 @@ int main(int argc, char *argv[]) {
                             needs_draw = true;
                             break;
                         case EVT_STATE_CHANGED:
+                            if ((ev.data.state.state_flags & 1) == 0) {
+                                last_bar_buttons = 0;
+                                last_menu_buttons = 0;
+                            }
                             update_window_focus(ev.surface_id, ev.data.state.state_flags);
                             needs_draw = true;
                             break;

@@ -794,19 +794,7 @@ static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *pa
 
 // Broadcast window created/destroyed events to OVERLAY docks
 void broadcast_window_event(uint32_t msg_type, surface_t *surf) {
-    struct {
-        uint32_t surface_id;
-        char title[128];
-        uint32_t state_flags;
-        char icon_path[256];
-    } __attribute__((packed)) payload;
-
-    payload.surface_id = surf->surface_id;
-    strncpy(payload.title, surf->title, 127);
-    payload.title[127] = '\0';
-    payload.state_flags = surf->state_flags;
-    strncpy(payload.icon_path, surf->icon_path, 255);
-    payload.icon_path[255] = '\0';
+    if (!surf) return;
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active) {
@@ -814,7 +802,34 @@ void broadcast_window_event(uint32_t msg_type, surface_t *surf) {
             surface_t *c = surface_head;
             while (c) {
                 if (c->client_fd == clients[i].fd && c->layer == 3 /* OVERLAY */) {
-                    send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    if (msg_type == EVT_STATE_CHANGED) {
+                        struct {
+                            uint32_t surface_id;
+                            uint32_t state_flags;
+                        } __attribute__((packed)) payload = {
+                            surf->surface_id,
+                            surf->state_flags
+                        };
+                        send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    } else if (msg_type == EVT_WINDOW_DESTROYED) {
+                        uint32_t payload = surf->surface_id;
+                        send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    } else {
+                        struct {
+                            uint32_t surface_id;
+                            char title[128];
+                            uint32_t state_flags;
+                            char icon_path[256];
+                        } __attribute__((packed)) payload;
+
+                        payload.surface_id = surf->surface_id;
+                        strncpy(payload.title, surf->title, 127);
+                        payload.title[127] = '\0';
+                        payload.state_flags = surf->state_flags;
+                        strncpy(payload.icon_path, surf->icon_path, 255);
+                        payload.icon_path[255] = '\0';
+                        send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    }
                     break;
                 }
                 c = c->next;

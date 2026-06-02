@@ -19,6 +19,7 @@
 #include "libtheme/theme.h"
 #include "libui/ui.h"
 #include "libnovaproto/novaproto.h"
+#include "nova_keymap.h"
 
 #define MAX_CLIENTS 64
 #define TITLEBAR_HEIGHT 26
@@ -49,72 +50,6 @@ typedef struct {
 
 static autostart_t autostarts[8];
 static int autostart_count = 0;
-
-typedef struct __attribute__((packed)) {
-    uint16_t keycode;
-    uint32_t codepoint;
-    uint32_t modifiers;
-    uint8_t pressed;
-    uint8_t repeat;
-    uint8_t is_text;
-} boredos_keyboard_event_t;
-
-typedef enum {
-    BKEY_NONE = 0,
-    BKEY_ESC,
-    BKEY_1, BKEY_2, BKEY_3, BKEY_4, BKEY_5, BKEY_6, BKEY_7, BKEY_8, BKEY_9, BKEY_0,
-    BKEY_MINUS,
-    BKEY_EQUAL,
-    BKEY_BACKSPACE,
-    BKEY_TAB,
-    BKEY_Q, BKEY_W, BKEY_E, BKEY_R, BKEY_T, BKEY_Y, BKEY_U, BKEY_I, BKEY_O, BKEY_P,
-    BKEY_LBRACKET,
-    BKEY_RBRACKET,
-    BKEY_ENTER,
-    BKEY_LEFT_CTRL,
-    BKEY_A, BKEY_S, BKEY_D, BKEY_F, BKEY_G, BKEY_H, BKEY_J, BKEY_K, BKEY_L,
-    BKEY_SEMICOLON,
-    BKEY_APOSTROPHE,
-    BKEY_GRAVE,
-    BKEY_LEFT_SHIFT,
-    BKEY_BACKSLASH,
-    BKEY_Z, BKEY_X, BKEY_C, BKEY_V, BKEY_B, BKEY_N, BKEY_M,
-    BKEY_COMMA,
-    BKEY_DOT,
-    BKEY_SLASH,
-    BKEY_RIGHT_SHIFT,
-    BKEY_KP_STAR,
-    BKEY_LEFT_ALT,
-    BKEY_SPACE,
-    BKEY_CAPS_LOCK,
-    BKEY_F1, BKEY_F2, BKEY_F3, BKEY_F4, BKEY_F5, BKEY_F6,
-    BKEY_F7, BKEY_F8, BKEY_F9, BKEY_F10,
-    BKEY_NUM_LOCK,
-    BKEY_SCROLL_LOCK,
-    BKEY_KP_7, BKEY_KP_8, BKEY_KP_9,
-    BKEY_KP_MINUS,
-    BKEY_KP_4, BKEY_KP_5, BKEY_KP_6,
-    BKEY_KP_PLUS,
-    BKEY_KP_1, BKEY_KP_2, BKEY_KP_3,
-    BKEY_KP_0,
-    BKEY_KP_DOT,
-    BKEY_F11,
-    BKEY_F12,
-    BKEY_KP_ENTER,
-    BKEY_RIGHT_CTRL,
-    BKEY_KP_SLASH,
-    BKEY_RIGHT_ALT,
-    BKEY_HOME,
-    BKEY_ARROW_UP,
-    BKEY_PAGE_UP,
-    BKEY_ARROW_LEFT,
-    BKEY_ARROW_RIGHT,
-    BKEY_END,
-    BKEY_ARROW_DOWN,
-    BKEY_PAGE_DOWN,
-    BKEY_INSERT,
-    BKEY_DELETE,
-} BoredKeycode;
 
 // Surface represention
 typedef struct surface {
@@ -249,9 +184,12 @@ static void mark_dirty_rect(int x, int y, int w, int h) {
 static int sig_pipe[2] = { -1, -1 };
 
 // Keyboard Modifier states
+static const NovaKeymap *active_keymap = NULL;
 static bool shift_pressed = false;
 static bool ctrl_pressed = false;
 static bool alt_pressed = false;
+static bool altgr_pressed = false;
+static bool caps_lock = false;
 
 // List of all connected clients
 typedef struct {
@@ -296,6 +234,33 @@ static const NovaKeycode scancode_to_novakey_ext[] = {
     [0x1C] = KEY_ENTER // Numpad Enter
 };
 
+static uint32_t keyboard_modifiers(void) {
+    uint32_t modifiers = 0;
+    if (shift_pressed) modifiers |= NOVA_KMOD_SHIFT;
+    if (ctrl_pressed) modifiers |= NOVA_KMOD_CTRL;
+    if (alt_pressed) modifiers |= NOVA_KMOD_ALT;
+    if (altgr_pressed) modifiers |= NOVA_KMOD_ALTGR;
+    if (caps_lock) modifiers |= NOVA_KMOD_CAPS;
+    return modifiers;
+}
+
+static NovaKeycode raw_scancode_to_keycode(uint8_t scancode, bool extended) {
+    if (extended) {
+        if (scancode < sizeof(scancode_to_novakey_ext) / sizeof(scancode_to_novakey_ext[0])) {
+            return scancode_to_novakey_ext[scancode];
+        }
+        return KEY_UNKNOWN;
+    }
+
+    NovaKeycode key = nova_keymap_keycode(active_keymap, scancode);
+    if (key != KEY_UNKNOWN) return key;
+
+    if (scancode < sizeof(scancode_to_novakey) / sizeof(scancode_to_novakey[0])) {
+        return scancode_to_novakey[scancode];
+    }
+    return KEY_UNKNOWN;
+}
+
 static char *trim_config(char *str) {
     while (*str && (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')) str++;
     if (*str == '\0') return str;
@@ -325,22 +290,15 @@ static bool parse_bool_config(const char *val, bool fallback) {
     return fallback;
 }
 
-static int keyboard_layout_id_from_name(const char *name) {
-    if (streq_ci(name, "qwerty") || streq_ci(name, "us")) return 0;
-    if (streq_ci(name, "azerty") || streq_ci(name, "fr")) return 1;
-    if (streq_ci(name, "qwertz") || streq_ci(name, "de")) return 2;
-    if (streq_ci(name, "dvorak")) return 3;
-    return -1;
-}
-
-static void apply_keyboard_layout(const char *layout) {
-    int id = keyboard_layout_id_from_name(layout);
-    if (id < 0) {
+static void set_keyboard_layout(const char *layout) {
+    const NovaKeymap *map = nova_keymap_find(layout);
+    if (!map) {
         printf("Compositor: Unknown keyboard layout '%s'\n", layout ? layout : "");
         return;
     }
-    sys_system(SYSTEM_CMD_SET_KEYBOARD_LAYOUT, (uint64_t)id, 0, 0, 0);
-    printf("Compositor: Keyboard layout set to %s (%d)\n", layout, id);
+
+    active_keymap = map;
+    printf("Compositor: Keyboard layout set to %s\n", map->name);
 }
 
 static autostart_t *find_or_create_autostart(const char *name, bool default_respawn) {
@@ -463,7 +421,7 @@ void load_nova_config(const char *path) {
 
         if (streq_ci(section, "keyboard")) {
             if (strcmp(key, "layout") == 0) {
-                apply_keyboard_layout(val);
+                set_keyboard_layout(val);
             }
             continue;
         }
@@ -601,64 +559,6 @@ static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
     };
 
     return send_frame(surf->client_fd, EVT_POINTER, surf->surface_id, &pl, sizeof(pl)) == 0;
-}
-
-static NovaKeycode map_boredos_keycode(uint16_t keycode) {
-    switch (keycode) {
-        case BKEY_A:           return KEY_A;
-        case BKEY_B:           return KEY_B;
-        case BKEY_C:           return KEY_C;
-        case BKEY_D:           return KEY_D;
-        case BKEY_E:           return KEY_E;
-        case BKEY_F:           return KEY_F;
-        case BKEY_G:           return KEY_G;
-        case BKEY_H:           return KEY_H;
-        case BKEY_I:           return KEY_I;
-        case BKEY_J:           return KEY_J;
-        case BKEY_K:           return KEY_K;
-        case BKEY_L:           return KEY_L;
-        case BKEY_M:           return KEY_M;
-        case BKEY_N:           return KEY_N;
-        case BKEY_O:           return KEY_O;
-        case BKEY_P:           return KEY_P;
-        case BKEY_Q:           return KEY_Q;
-        case BKEY_R:           return KEY_R;
-        case BKEY_S:           return KEY_S;
-        case BKEY_T:           return KEY_T;
-        case BKEY_U:           return KEY_U;
-        case BKEY_V:           return KEY_V;
-        case BKEY_W:           return KEY_W;
-        case BKEY_X:           return KEY_X;
-        case BKEY_Y:           return KEY_Y;
-        case BKEY_Z:           return KEY_Z;
-        case BKEY_0:           return KEY_0;
-        case BKEY_1:           return KEY_1;
-        case BKEY_2:           return KEY_2;
-        case BKEY_3:           return KEY_3;
-        case BKEY_4:           return KEY_4;
-        case BKEY_5:           return KEY_5;
-        case BKEY_6:           return KEY_6;
-        case BKEY_7:           return KEY_7;
-        case BKEY_8:           return KEY_8;
-        case BKEY_9:           return KEY_9;
-        case BKEY_ESC:         return KEY_ESCAPE;
-        case BKEY_BACKSPACE:   return KEY_BACKSPACE;
-        case BKEY_TAB:         return KEY_TAB;
-        case BKEY_ENTER:
-        case BKEY_KP_ENTER:    return KEY_ENTER;
-        case BKEY_SPACE:       return KEY_SPACE;
-        case BKEY_ARROW_LEFT:  return KEY_LEFT;
-        case BKEY_ARROW_RIGHT: return KEY_RIGHT;
-        case BKEY_ARROW_UP:    return KEY_UP;
-        case BKEY_ARROW_DOWN:  return KEY_DOWN;
-        case BKEY_LEFT_SHIFT:  return KEY_LSHIFT;
-        case BKEY_RIGHT_SHIFT: return KEY_RSHIFT;
-        case BKEY_LEFT_CTRL:   return KEY_LCTRL;
-        case BKEY_RIGHT_CTRL:  return KEY_RCTRL;
-        case BKEY_LEFT_ALT:    return KEY_LALT;
-        case BKEY_RIGHT_ALT:   return KEY_RALT;
-        default:               return KEY_UNKNOWN;
-    }
 }
 
 static bool send_key_event(surface_t *surf,
@@ -2175,12 +2075,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Open Exclusive Inputs
-    int keyevent_fd = open("/dev/keyevent", O_RDONLY | O_NONBLOCK);
-    int kbd_fd = -1;
-    if (keyevent_fd < 0) {
-        kbd_fd = open("/dev/keyboard", O_RDONLY | O_NONBLOCK);
-    }
+    // Open raw keyboard input. Nova owns layout and UTF-8 translation.
+    int kbd_fd = open("/dev/keyboard", O_RDONLY | O_NONBLOCK);
     int mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
     if (mouse_fd >= 0) {
         uint8_t dummy;
@@ -2235,16 +2131,7 @@ int main(int argc, char *argv[]) {
         // Collect fds for sys_poll
         int fd_idx = 0;
         
-        // 0. Processed keyboard event device
-        if (keyevent_fd >= 0) {
-            poll_fds[fd_idx].fd = keyevent_fd;
-            poll_fds[fd_idx].events = POLLIN;
-            poll_fds[fd_idx].revents = 0;
-            client_surfaces[fd_idx] = NULL;
-            fd_idx++;
-        }
-
-        // 0b. Legacy raw keyboard device
+        // 0. Raw keyboard device
         if (kbd_fd >= 0) {
             poll_fds[fd_idx].fd = kbd_fd;
             poll_fds[fd_idx].events = POLLIN;
@@ -2319,28 +2206,8 @@ int main(int argc, char *argv[]) {
 
         for (int i = 0; i < fd_idx; i++) {
             if (poll_fds[i].revents & POLLIN) {
-                // 0. Processed keyboard event
-                if (poll_fds[i].fd == keyevent_fd) {
-                    boredos_keyboard_event_t ev;
-                    while (read(keyevent_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
-                        NovaKeycode key = map_boredos_keycode(ev.keycode);
-
-                        if (ev.pressed && key == KEY_Q &&
-                            (ev.modifiers & 0x1) &&
-                            (ev.modifiers & 0x4)) {
-                            quit_loop = true;
-                        }
-
-                        surface_t *focused = surface_get_focused();
-                        if (!quit_loop && focused) {
-                            uint32_t codepoint = ev.is_text ? ev.codepoint : 0;
-                            send_key_event(focused, key, ev.modifiers, ev.pressed != 0, codepoint);
-                        }
-                    }
-                }
-
-                // 0b. Legacy raw keyboard event
-                else if (poll_fds[i].fd == kbd_fd) {
+                // 0. Raw keyboard event
+                if (poll_fds[i].fd == kbd_fd) {
                     uint8_t scancode;
                     while (read(kbd_fd, &scancode, 1) == 1) {
                         if (scancode == 0xE0) {
@@ -2350,38 +2217,40 @@ int main(int argc, char *argv[]) {
 
                         bool pressed = !(scancode & 0x80);
                         uint8_t base_sc = scancode & 0x7F;
+                        bool extended = e0_prefix;
+                        e0_prefix = false;
 
                         // Track modifiers
-                        if (base_sc == 0x2A || base_sc == 0x36) shift_pressed = pressed;
-                        else if (base_sc == 0x1D) ctrl_pressed = pressed;
-                        else if (base_sc == 0x38) alt_pressed = pressed;
+                        if (!extended && (base_sc == 0x2A || base_sc == 0x36)) {
+                            shift_pressed = pressed;
+                        } else if (base_sc == 0x1D) {
+                            ctrl_pressed = pressed;
+                        } else if (!extended && base_sc == 0x38) {
+                            alt_pressed = pressed;
+                        } else if (extended && base_sc == 0x38) {
+                            altgr_pressed = pressed;
+                        } else if (!extended && base_sc == 0x3A && pressed) {
+                            caps_lock = !caps_lock;
+                        }
 
-                        NovaKeycode key = KEY_UNKNOWN;
-                        if (e0_prefix) {
-                            if (base_sc < sizeof(scancode_to_novakey_ext)/sizeof(scancode_to_novakey_ext[0])) {
-                                key = scancode_to_novakey_ext[base_sc];
-                            }
-                            e0_prefix = false;
-                        } else {
-                            if (base_sc < sizeof(scancode_to_novakey)/sizeof(scancode_to_novakey[0])) {
-                                key = scancode_to_novakey[base_sc];
-                            }
+                        NovaKeycode key = raw_scancode_to_keycode(base_sc, extended);
+                        uint32_t modifiers = keyboard_modifiers();
+                        uint32_t codepoint = 0;
+                        if (pressed && !extended) {
+                            codepoint = nova_keymap_codepoint(active_keymap, base_sc, modifiers);
                         }
 
                         // Global hotkeys
-                        if (pressed && key == KEY_Q && shift_pressed && alt_pressed) {
+                        if (pressed && key == KEY_Q &&
+                            (modifiers & NOVA_KMOD_SHIFT) &&
+                            (modifiers & NOVA_KMOD_ALT)) {
                             quit_loop = true;
                         }
 
                         // Dispatch to focused window
                         surface_t *focused = surface_get_focused();
-                        if (!quit_loop && focused && key != KEY_UNKNOWN) {
-                            uint32_t modifiers = 0;
-                            if (shift_pressed) modifiers |= 0x1;
-                            if (ctrl_pressed) modifiers |= 0x2;
-                            if (alt_pressed) modifiers |= 0x4;
-
-                            send_key_event(focused, key, modifiers, pressed, 0);
+                        if (!quit_loop && focused) {
+                            send_key_event(focused, key, modifiers, pressed, codepoint);
                         }
                     }
                 }
@@ -2752,7 +2621,6 @@ int main(int argc, char *argv[]) {
     }
 
     // Clean up
-    if (keyevent_fd >= 0) close(keyevent_fd);
     if (kbd_fd >= 0) close(kbd_fd);
     if (mouse_fd >= 0) close(mouse_fd);
     close(server_fd);

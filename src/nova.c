@@ -2421,15 +2421,14 @@ int main(int argc, char *argv[]) {
                                         c->is_resizing = false;
                                         c = c->next;
                                     }
-                                }
 
-                                // Normal pointer movements (hover routing)
-                                surface_t *target = grabbed;
-                                if (!target && hovered && click_region == 0) {
-                                    target = hovered;
-                                }
-                                if (target) {
-                                    send_pointer_event(target, 0);
+                                    surface_t *target = grabbed;
+                                    if (!target && hovered && click_region == 0) {
+                                        target = hovered;
+                                    }
+                                    if (target) {
+                                        send_pointer_event(target, 0);
+                                    }
                                 }
                                 pointer_grab_surface_id = 0;
                             }

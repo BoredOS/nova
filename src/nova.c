@@ -1893,6 +1893,13 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (surf) {
                 strncpy(surf->title, p->title, 127);
                 surf->title[127] = '\0';
+                if (surf->layer == 1 || surf->layer == 2) {
+                    mark_dirty_rect(surf->x - BORDER_WIDTH,
+                                    surf->y - TITLEBAR_HEIGHT - BORDER_WIDTH,
+                                    (int)surf->w + BORDER_WIDTH * 2,
+                                    TITLEBAR_HEIGHT + BORDER_WIDTH);
+                    needs_composite = true;
+                }
                 broadcast_window_event(EVT_WINDOW_TITLE_CHANGED, surf);
             }
             break;

@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <syscall.h>
+#include "utf-8.h"
 #include "libtheme/theme.h"
 #include "libui/ui.h"
 #include "libnovaproto/novaproto.h"
@@ -113,6 +114,8 @@ static uint32_t resume_focus_id = 0;
 
 static uint32_t last_bar_click_ms = 0;
 static uint32_t last_menu_click_ms = 0;
+static uint32_t last_bar_buttons = 0;
+static uint32_t last_menu_buttons = 0;
 
 static int fd = -1;
 static uint32_t bar_surf_id = 0;
@@ -134,6 +137,8 @@ static image_t app_icon_img = {0};
 
 static char search_buf[64] = "";
 static int search_len = 0;
+
+static bool bar_dirty = true;
 
 static bool should_track_window(uint32_t surface_id, const char *title) {
     if (surface_id == bar_surf_id) return false;
@@ -625,6 +630,37 @@ static void apply_filter(void) {
     if (selected_idx < 0) selected_idx = 0;
 }
 
+static void search_backspace_utf8(void) {
+    if (search_len <= 0) return;
+
+    const char *prev = text_prev_utf8(search_buf, search_buf + search_len);
+    int prev_pos = (int)(prev - search_buf);
+    if (prev_pos < 0 || prev_pos >= search_len) {
+        prev_pos = search_len - 1;
+    }
+    search_len = prev_pos;
+    search_buf[search_len] = '\0';
+}
+
+static bool search_append_utf8(const char *text, uint8_t text_len) {
+    if (!text || text_len == 0) return false;
+    if (text_len > 4) text_len = 4;
+    if (search_len + text_len >= (int)sizeof(search_buf)) return false;
+
+    memcpy(search_buf + search_len, text, text_len);
+    search_len += text_len;
+    search_buf[search_len] = '\0';
+    return true;
+}
+
+static bool socket_readable(struct pollfd *pfd) {
+    if (!pfd) return false;
+
+    pfd->revents = 0;
+    int pr = poll(pfd, 1, 0);
+    return pr > 0 && (pfd->revents & POLLIN);
+}
+
 static int get_approx_string_width(const char *str) {
     if (!str) return 0;
     int len = 0;
@@ -815,8 +851,34 @@ static void draw_menu(void) {
 
 static void close_menu(void);
 
+static int menu_hidden_x(void) {
+    return -MENU_W - 16;
+}
+
+static int menu_hidden_y(void) {
+    return config.position_bottom ? screen_h + 16 : -MENU_H - 16;
+}
+
+static int menu_visible_y(void) {
+    int menu_y = config.position_bottom ? (screen_h - (int)bar_h - MENU_H) : (int)bar_h;
+    return menu_y < 0 ? 0 : menu_y;
+}
+
+static void destroy_menu_surface(void) {
+    if (menu_surf_id) {
+        nova_destroy_surface(fd, menu_surf_id);
+        menu_surf_id = 0;
+    }
+    if (menu_pixels) {
+        munmap(menu_pixels, MENU_W * MENU_H * 4);
+        menu_pixels = NULL;
+    }
+    menu_open = false;
+}
+
 static void close_taskbar(void) {
     close_menu();
+    destroy_menu_surface();
     if (bar_surf_id) {
         nova_destroy_surface(fd, bar_surf_id);
         bar_surf_id = 0;
@@ -850,12 +912,14 @@ static void perform_menu_action(int action_idx) {
     }
 }
 
-static void launch_selected_app(void) {
+static bool launch_selected_app(void) {
     if (selected_idx >= 0 && selected_idx < filtered_count) {
         char full_path[256];
         snprintf(full_path, sizeof(full_path), "/bin/%s", filtered_apps[selected_idx].filename);
-        sys_spawn(full_path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
+        int pid = sys_spawn(full_path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
+        return pid > 0;
     }
+    return false;
 }
 
 static void reset_menu_search(void) {
@@ -867,14 +931,12 @@ static void reset_menu_search(void) {
 
 static void close_menu(void) {
     if (!menu_open) return;
-    nova_destroy_surface(fd, menu_surf_id);
-    if (menu_pixels) {
-        munmap(menu_pixels, MENU_W * MENU_H * 4);
-        menu_pixels = NULL;
-    }
-    menu_surf_id = 0;
     menu_open = false;
-    draw_taskbar();
+    last_menu_buttons = 0;
+    if (menu_surf_id) {
+        nova_set_state(fd, menu_surf_id, 0);
+        nova_move_surface(fd, menu_surf_id, menu_hidden_x(), menu_hidden_y());
+    }
 
     if (resume_focus_id != 0) {
         nova_set_state(fd, resume_focus_id, 1 /* active focused state */);
@@ -882,21 +944,19 @@ static void close_menu(void) {
     }
 }
 
-static void open_menu(void) {
-    if (menu_open) return;
-
-    resume_focus_id = last_active_surface_id;
+static bool ensure_menu_surface(void) {
+    if (menu_surf_id && menu_pixels) return true;
 
     char shm_path[128];
     if (nova_create_surface(fd, MENU_W, MENU_H, MENU_LAYER, 0, &menu_surf_id, shm_path) < 0) {
-        return;
+        return false;
     }
 
     int shm_fd = open(shm_path, O_RDWR);
     if (shm_fd < 0) {
         nova_destroy_surface(fd, menu_surf_id);
         menu_surf_id = 0;
-        return;
+        return false;
     }
 
     menu_pixels = mmap(NULL, MENU_W * MENU_H * 4, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -905,20 +965,24 @@ static void open_menu(void) {
         menu_pixels = NULL;
         nova_destroy_surface(fd, menu_surf_id);
         menu_surf_id = 0;
-        return;
+        return false;
     }
 
-    int menu_x = 0;
-    int menu_y = config.position_bottom ? (screen_h - bar_h - MENU_H) : (int)bar_h;
-    if (menu_y < 0) menu_y = 0;
+    nova_move_surface(fd, menu_surf_id, menu_hidden_x(), menu_hidden_y());
+    return true;
+}
 
-    nova_move_surface(fd, menu_surf_id, menu_x, menu_y);
-    nova_set_state(fd, menu_surf_id, 1 /* focused */);
+static void open_menu(void) {
+    if (menu_open) return;
+    if (!ensure_menu_surface()) return;
 
+    resume_focus_id = last_active_surface_id;
+    last_menu_buttons = 0;
     reset_menu_search();
     menu_open = true;
+    nova_move_surface(fd, menu_surf_id, 0, menu_visible_y());
     draw_menu();
-    draw_taskbar();
+    nova_set_state(fd, menu_surf_id, 1 /* focused */);
 }
 
 static void handle_bar_click(int click_x, int click_y) {
@@ -979,7 +1043,9 @@ static void handle_menu_click(int click_x, int click_y) {
             click_y >= y && click_y < y + ITEM_HEIGHT) {
             selected_idx = i;
             draw_menu();
-            launch_selected_app();
+            if (launch_selected_app()) {
+                resume_focus_id = 0;
+            }
             close_menu();
             return;
         }
@@ -1009,36 +1075,19 @@ static void handle_menu_key(const NovaEvent *ev) {
         }
     } else if (kc == KEY_ENTER) {
         if (selected_idx >= 0 && selected_idx < filtered_count) {
-            launch_selected_app();
+            if (launch_selected_app()) {
+                resume_focus_id = 0;
+            }
             close_menu();
         }
     } else if (kc == KEY_BACKSPACE) {
         if (search_len > 0) {
-            search_len--;
-            search_buf[search_len] = '\0';
+            search_backspace_utf8();
             apply_filter();
             draw_menu();
         }
-    } else if (kc == KEY_SPACE) {
-        if (search_len < (int)sizeof(search_buf) - 1) {
-            search_buf[search_len++] = ' ';
-            search_buf[search_len] = '\0';
-            apply_filter();
-            draw_menu();
-        }
-    } else if (kc >= KEY_A && kc <= KEY_Z) {
-        char letter = (char)('a' + (kc - KEY_A));
-        if (search_len < (int)sizeof(search_buf) - 1) {
-            search_buf[search_len++] = letter;
-            search_buf[search_len] = '\0';
-            apply_filter();
-            draw_menu();
-        }
-    } else if (kc >= KEY_0 && kc <= KEY_9) {
-        char digit = (char)('0' + (kc - KEY_0));
-        if (search_len < (int)sizeof(search_buf) - 1) {
-            search_buf[search_len++] = digit;
-            search_buf[search_len] = '\0';
+    } else if (ev->data.key.text_len > 0) {
+        if (search_append_utf8(ev->data.key.text, ev->data.key.text_len)) {
             apply_filter();
             draw_menu();
         }
@@ -1114,7 +1163,7 @@ int main(int argc, char *argv[]) {
     pfd.events = POLLIN;
 
     uint32_t last_clock_tick = 0;
-    draw_taskbar();
+    bar_dirty = true;
 
     while (1) {
         int timeout = 200;
@@ -1126,13 +1175,13 @@ int main(int argc, char *argv[]) {
         uint32_t now = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
         if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
-            draw_taskbar();
+            bar_dirty = true;
         }
 
         if ((pr > 0 && (pfd.revents & POLLIN)) || nova_pending_events()) {
             NovaEvent ev;
             bool needs_draw = false;
-            while (nova_pending_events() || (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))) {
+            while (nova_pending_events() || socket_readable(&pfd)) {
                 if (nova_poll_event(fd, &ev) == 0) {
                     switch (ev.type) {
                         case EVT_WINDOW_CREATED:
@@ -1141,6 +1190,8 @@ int main(int argc, char *argv[]) {
                             break;
 
                         case EVT_WINDOW_DESTROYED:
+                            last_bar_buttons = 0;
+                            last_menu_buttons = 0;
                             remove_window(ev.surface_id);
                             needs_draw = true;
                             break;
@@ -1149,23 +1200,29 @@ int main(int argc, char *argv[]) {
                             needs_draw = true;
                             break;
                         case EVT_STATE_CHANGED:
+                            if ((ev.data.state.state_flags & 1) == 0) {
+                                last_bar_buttons = 0;
+                                last_menu_buttons = 0;
+                            }
                             update_window_focus(ev.surface_id, ev.data.state.state_flags);
                             needs_draw = true;
                             break;
                         case EVT_POINTER: {
                             uint32_t buttons = ev.data.pointer.buttons;
-                            if (buttons & 1) {
-                                uint32_t now_ms = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
-                                if (ev.surface_id == bar_surf_id) {
-                                    if (now_ms - last_bar_click_ms > 180) {
-                                        last_bar_click_ms = now_ms;
-                                        handle_bar_click(ev.data.pointer.x, ev.data.pointer.y);
-                                    }
-                                } else if (menu_open && ev.surface_id == menu_surf_id) {
-                                    if (now_ms - last_menu_click_ms > 180) {
-                                        last_menu_click_ms = now_ms;
-                                        handle_menu_click(ev.data.pointer.x, ev.data.pointer.y);
-                                    }
+                            bool left_pressed = (buttons & 1) != 0;
+                            if (ev.surface_id == bar_surf_id) {
+                                bool left_went_down = left_pressed && ((last_bar_buttons & 1) == 0);
+                                last_bar_buttons = buttons;
+                                if (left_went_down && now - last_bar_click_ms > 80) {
+                                    last_bar_click_ms = now;
+                                    handle_bar_click(ev.data.pointer.x, ev.data.pointer.y);
+                                }
+                            } else if (ev.surface_id == menu_surf_id) {
+                                bool left_went_down = left_pressed && ((last_menu_buttons & 1) == 0);
+                                last_menu_buttons = buttons;
+                                if (menu_open && left_went_down && now - last_menu_click_ms > 80) {
+                                    last_menu_click_ms = now;
+                                    handle_menu_click(ev.data.pointer.x, ev.data.pointer.y);
                                 }
                             }
                             break;
@@ -1188,8 +1245,13 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (needs_draw) {
-                draw_taskbar();
+                bar_dirty = true;
             }
+        }
+
+        if (bar_dirty) {
+            bar_dirty = false;
+            draw_taskbar();
         }
     }
 

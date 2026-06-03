@@ -111,7 +111,8 @@ static bool pop_event(NovaEvent *ev) {
     return true;
 }
 
-static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, NovaEvent *event_out) {
+static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, uint32_t payload_size, NovaEvent *event_out) {
+    memset(event_out, 0, sizeof(*event_out));
     event_out->type = msg_type;
     
     switch (msg_type) {
@@ -121,11 +122,23 @@ static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, Nov
                 uint32_t keycode;
                 uint32_t modifiers;
                 uint8_t pressed;
+                uint8_t text_len;
+                char text[5];
+                uint32_t codepoint;
             } __attribute__((packed)) *p = (void *)buffer;
             event_out->surface_id = p->surface_id;
             event_out->data.key.keycode = p->keycode;
             event_out->data.key.modifiers = p->modifiers;
             event_out->data.key.pressed = p->pressed;
+            if (payload_size >= sizeof(*p)) {
+                event_out->data.key.text_len = p->text_len;
+                if (event_out->data.key.text_len > 4) {
+                    event_out->data.key.text_len = 4;
+                }
+                memcpy(event_out->data.key.text, p->text, event_out->data.key.text_len);
+                event_out->data.key.text[event_out->data.key.text_len] = '\0';
+                event_out->data.key.codepoint = p->codepoint;
+            }
             break;
         }
         case EVT_POINTER: {
@@ -212,7 +225,7 @@ static int recv_sync_reply(int fd, uint32_t expected_type, void *payload_out, ui
 
         // Parse and queue the out-of-order event
         NovaEvent ev;
-        parse_event_from_frame(header.msg_type, buffer, &ev);
+        parse_event_from_frame(header.msg_type, buffer, header.payload_size, &ev);
         push_event(&ev);
     }
 }
@@ -267,8 +280,17 @@ int nova_resize_surface(int fd, uint32_t surf_id, uint32_t w, uint32_t h, char *
 int nova_damage_surface(int fd, uint32_t surf_id, int rect_count, const NovaRect *rects) {
     uint32_t header_size = 4 + 4;
     uint32_t payload_size = header_size + rect_count * sizeof(NovaRect);
-    uint8_t *buffer = (uint8_t *)malloc(payload_size);
-    if (!buffer) return -1;
+
+    // Stack buffer for common case (up to ~14 rects), avoids malloc/free per frame
+    uint8_t stack_buf[256];
+    uint8_t *buffer = stack_buf;
+    bool heap = false;
+
+    if (payload_size > sizeof(stack_buf)) {
+        buffer = (uint8_t *)malloc(payload_size);
+        if (!buffer) return -1;
+        heap = true;
+    }
 
     *(uint32_t *)(buffer) = surf_id;
     *(uint32_t *)(buffer + 4) = (uint32_t)rect_count;
@@ -277,7 +299,7 @@ int nova_damage_surface(int fd, uint32_t surf_id, int rect_count, const NovaRect
     }
 
     int rc = send_frame(fd, MSG_DAMAGE, buffer, payload_size);
-    free(buffer);
+    if (heap) free(buffer);
     return rc;
 }
 
@@ -364,11 +386,10 @@ int nova_poll_event(int fd, NovaEvent *event_out) {
         return -1;
     }
 
-    parse_event_from_frame(header.msg_type, buffer, event_out);
+    parse_event_from_frame(header.msg_type, buffer, header.payload_size, event_out);
     return 0;
 }
 
 int nova_pending_events(void) {
     return event_queue_head != event_queue_tail;
 }
-

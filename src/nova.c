@@ -15,9 +15,11 @@
 #include <syscall.h>
 #include <signal.h>
 #include <math.h>
+#include "utf-8.h"
 #include "libtheme/theme.h"
 #include "libui/ui.h"
 #include "libnovaproto/novaproto.h"
+#include "nova_keymap.h"
 
 #define MAX_CLIENTS 64
 #define TITLEBAR_HEIGHT 26
@@ -26,7 +28,9 @@
 #define RESIZE_MIN_CONTENT_W 64
 #define RESIZE_MIN_CONTENT_H 48
 #define RESIZE_REQUEST_INTERVAL_MS 120
-
+#ifndef FBIOSET_DIRTY
+#define FBIOSET_DIRTY 0x4606
+#endif
 #define RESIZE_EDGE_LEFT 16
 #define RESIZE_EDGE_RIGHT 32
 #define RESIZE_EDGE_TOP 64
@@ -34,10 +38,12 @@
 
 // Autostart configuration items
 typedef struct {
-    char path[128];
+    char path[160];
+    char args[256];
     char name[32];
     int pid;
     bool respawn;
+    bool respawn_explicit;
     int retry_count;
     uint32_t respawn_at_ms;
 } autostart_t;
@@ -128,6 +134,7 @@ void copy_box_to_fb(int bx, int by, int bw, int bh);
 static int mx = 0;
 static int my = 0;
 static bool last_left_pressed = false;
+static uint32_t pointer_grab_surface_id = 0;
 static int last_cursor_x = -1;
 static int last_cursor_y = -1;
 static bool cursor_visible = false;
@@ -143,13 +150,46 @@ static bool has_dirty_rect = false;
 static bool needs_composite = false;
 static bool needs_cursor_only = false;
 
+static void mark_dirty_rect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0 || screen_w <= 0 || screen_h <= 0) return;
+
+    int x1 = x < 0 ? 0 : x;
+    int y1 = y < 0 ? 0 : y;
+    int x2 = x + w;
+    int y2 = y + h;
+    if (x2 > screen_w) x2 = screen_w;
+    if (y2 > screen_h) y2 = screen_h;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    if (!has_dirty_rect) {
+        dirty_x = x1;
+        dirty_y = y1;
+        dirty_w = x2 - x1;
+        dirty_h = y2 - y1;
+        has_dirty_rect = true;
+        return;
+    }
+
+    int old_x2 = dirty_x + dirty_w;
+    int old_y2 = dirty_y + dirty_h;
+    if (x1 < dirty_x) dirty_x = x1;
+    if (y1 < dirty_y) dirty_y = y1;
+    if (x2 > old_x2) old_x2 = x2;
+    if (y2 > old_y2) old_y2 = y2;
+    dirty_w = old_x2 - dirty_x;
+    dirty_h = old_y2 - dirty_y;
+}
+
 // Signal self-pipe descriptors
 static int sig_pipe[2] = { -1, -1 };
 
 // Keyboard Modifier states
+static const NovaKeymap *active_keymap = NULL;
 static bool shift_pressed = false;
 static bool ctrl_pressed = false;
 static bool alt_pressed = false;
+static bool altgr_pressed = false;
+static bool caps_lock = false;
 
 // List of all connected clients
 typedef struct {
@@ -194,54 +234,222 @@ static const NovaKeycode scancode_to_novakey_ext[] = {
     [0x1C] = KEY_ENTER // Numpad Enter
 };
 
-// Autostart config INI parser
+static uint32_t keyboard_modifiers(void) {
+    uint32_t modifiers = 0;
+    if (shift_pressed) modifiers |= NOVA_KMOD_SHIFT;
+    if (ctrl_pressed) modifiers |= NOVA_KMOD_CTRL;
+    if (alt_pressed) modifiers |= NOVA_KMOD_ALT;
+    if (altgr_pressed) modifiers |= NOVA_KMOD_ALTGR;
+    if (caps_lock) modifiers |= NOVA_KMOD_CAPS;
+    return modifiers;
+}
+
+static NovaKeycode raw_scancode_to_keycode(uint8_t scancode, bool extended) {
+    if (extended) {
+        if (scancode < sizeof(scancode_to_novakey_ext) / sizeof(scancode_to_novakey_ext[0])) {
+            return scancode_to_novakey_ext[scancode];
+        }
+        return KEY_UNKNOWN;
+    }
+
+    NovaKeycode key = nova_keymap_keycode(active_keymap, scancode);
+    if (key != KEY_UNKNOWN) return key;
+
+    if (scancode < sizeof(scancode_to_novakey) / sizeof(scancode_to_novakey[0])) {
+        return scancode_to_novakey[scancode];
+    }
+    return KEY_UNKNOWN;
+}
+
+static char *trim_config(char *str) {
+    while (*str && (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')) str++;
+    if (*str == '\0') return str;
+
+    char *end = str + strlen(str) - 1;
+    while (end >= str && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+        *end-- = '\0';
+    }
+    return str;
+}
+
+static bool streq_ci(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        char ca = *a++;
+        char cb = *b++;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return false;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool parse_bool_config(const char *val, bool fallback) {
+    if (streq_ci(val, "true") || streq_ci(val, "yes") || streq_ci(val, "on") || strcmp(val, "1") == 0) return true;
+    if (streq_ci(val, "false") || streq_ci(val, "no") || streq_ci(val, "off") || strcmp(val, "0") == 0) return false;
+    return fallback;
+}
+
+static void set_keyboard_layout(const char *layout) {
+    const NovaKeymap *map = nova_keymap_find(layout);
+    if (!map) {
+        printf("Compositor: Unknown keyboard layout '%s'\n", layout ? layout : "");
+        return;
+    }
+
+    active_keymap = map;
+    printf("Compositor: Keyboard layout set to %s\n", map->name);
+}
+
+static autostart_t *find_or_create_autostart(const char *name, bool default_respawn) {
+    if (!name || !*name) return NULL;
+    for (int i = 0; i < autostart_count; i++) {
+        if (strcmp(autostarts[i].name, name) == 0) {
+            return &autostarts[i];
+        }
+    }
+    if (autostart_count >= (int)(sizeof(autostarts) / sizeof(autostarts[0]))) {
+        return NULL;
+    }
+
+    autostart_t *item = &autostarts[autostart_count++];
+    memset(item, 0, sizeof(*item));
+    strncpy(item->name, name, sizeof(item->name) - 1);
+    item->respawn = default_respawn;
+    return item;
+}
+
+static void resolve_command_path(const char *cmd, char *out, size_t out_size) {
+    if (!cmd || !*cmd || !out || out_size == 0) return;
+
+    out[0] = '\0';
+    if (cmd[0] == '/') {
+        strncpy(out, cmd, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    if (sys_exists(cmd)) {
+        strncpy(out, cmd, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    char candidate[160];
+    snprintf(candidate, sizeof(candidate), "/bin/%s", cmd);
+    if (sys_exists(candidate)) {
+        strncpy(out, candidate, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+
+    snprintf(candidate, sizeof(candidate), "/bin/%s.elf", cmd);
+    strncpy(out, candidate, out_size - 1);
+    out[out_size - 1] = '\0';
+}
+
+static void configure_autostart_command(autostart_t *item, const char *command) {
+    if (!item || !command) return;
+
+    char buf[256];
+    strncpy(buf, command, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *cmd = trim_config(buf);
+    if (*cmd == '\0') return;
+
+    char *args = cmd;
+    while (*args && *args != ' ' && *args != '\t') args++;
+    if (*args) {
+        *args++ = '\0';
+        args = trim_config(args);
+    }
+
+    resolve_command_path(cmd, item->path, sizeof(item->path));
+    if (args && *args) {
+        strncpy(item->args, args, sizeof(item->args) - 1);
+        item->args[sizeof(item->args) - 1] = '\0';
+    } else {
+        item->args[0] = '\0';
+    }
+}
+
+// Nova config INI parser
 void load_nova_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return;
 
+    autostart_count = 0;
+    bool default_autostart_respawn = true;
+    char section[32] = "";
     char line[256];
+
     while (fgets(line, sizeof(line), f)) {
-        char *start = line;
-        while (*start && (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')) start++;
+        char *start = trim_config(line);
         if (*start == '\0' || *start == ';' || *start == '#') continue;
 
-        if (*start == '[') continue;
+        if (*start == '[') {
+            char *end = strchr(start, ']');
+            if (!end) continue;
+            *end = '\0';
+            strncpy(section, trim_config(start + 1), sizeof(section) - 1);
+            section[sizeof(section) - 1] = '\0';
+            continue;
+        }
 
         char *eq = strchr(start, '=');
         if (!eq) continue;
         *eq = '\0';
-        char *key = start;
-        char *val = eq + 1;
+        char *key = trim_config(start);
+        char *val = trim_config(eq + 1);
 
-        char *key_end = key + strlen(key) - 1;
-        while (key_end >= key && (*key_end == ' ' || *key_end == '\t')) *key_end-- = '\0';
-
-        while (*val && (*val == ' ' || *val == '\t')) val++;
-        char *val_end = val + strlen(val) - 1;
-        while (val_end >= val && (*val_end == ' ' || *val_end == '\t' || *val_end == '\r' || *val_end == '\n')) *val_end-- = '\0';
-
-        if (strcmp(key, "active_titlebar_top") == 0) {
-            active_titlebar_top = theme_resolve_color(val, active_titlebar_top);
-        } else if (strcmp(key, "active_titlebar_bottom") == 0) {
-            active_titlebar_bottom = theme_resolve_color(val, active_titlebar_bottom);
-        } else if (strcmp(key, "inactive_titlebar_top") == 0) {
-            inactive_titlebar_top = theme_resolve_color(val, inactive_titlebar_top);
-        } else if (strcmp(key, "inactive_titlebar_bottom") == 0) {
-            inactive_titlebar_bottom = theme_resolve_color(val, inactive_titlebar_bottom);
-        } else if (strcmp(key, "active_border") == 0) {
-            active_border = theme_resolve_color(val, active_border);
-        } else if (strcmp(key, "inactive_border") == 0) {
-            inactive_border = theme_resolve_color(val, inactive_border);
-        } else if (strcmp(key, "shelf") == 0 || strcmp(key, "topbar") == 0 || strcmp(key, "taskbar") == 0 || strcmp(key, "wallpaperd") == 0) {
-            if (autostart_count < 8) {
-                strncpy(autostarts[autostart_count].path, val, sizeof(autostarts[autostart_count].path) - 1);
-                strncpy(autostarts[autostart_count].name, key, sizeof(autostarts[autostart_count].name) - 1);
-                autostarts[autostart_count].pid = 0;
-                autostarts[autostart_count].respawn = true;
-                autostarts[autostart_count].retry_count = 0;
-                autostarts[autostart_count].respawn_at_ms = 0;
-                autostart_count++;
+        if (section[0] == '\0' || streq_ci(section, "theme")) {
+            if (strcmp(key, "active_titlebar_top") == 0) {
+                active_titlebar_top = theme_resolve_color(val, active_titlebar_top);
+            } else if (strcmp(key, "active_titlebar_bottom") == 0) {
+                active_titlebar_bottom = theme_resolve_color(val, active_titlebar_bottom);
+            } else if (strcmp(key, "inactive_titlebar_top") == 0) {
+                inactive_titlebar_top = theme_resolve_color(val, inactive_titlebar_top);
+            } else if (strcmp(key, "inactive_titlebar_bottom") == 0) {
+                inactive_titlebar_bottom = theme_resolve_color(val, inactive_titlebar_bottom);
+            } else if (strcmp(key, "active_border") == 0) {
+                active_border = theme_resolve_color(val, active_border);
+            } else if (strcmp(key, "inactive_border") == 0) {
+                inactive_border = theme_resolve_color(val, inactive_border);
             }
+        }
+
+        if (streq_ci(section, "keyboard")) {
+            if (strcmp(key, "layout") == 0) {
+                set_keyboard_layout(val);
+            }
+            continue;
+        }
+
+        if (streq_ci(section, "autostart")) {
+            if (strcmp(key, "respawn") == 0) {
+                default_autostart_respawn = parse_bool_config(val, default_autostart_respawn);
+                for (int i = 0; i < autostart_count; i++) {
+                    if (!autostarts[i].respawn_explicit) {
+                        autostarts[i].respawn = default_autostart_respawn;
+                    }
+                }
+                continue;
+            }
+
+            char *dot = strchr(key, '.');
+            if (dot && strcmp(dot + 1, "respawn") == 0) {
+                *dot = '\0';
+                autostart_t *item = find_or_create_autostart(key, default_autostart_respawn);
+                if (item) {
+                    item->respawn = parse_bool_config(val, item->respawn);
+                    item->respawn_explicit = true;
+                }
+                continue;
+            }
+
+            autostart_t *item = find_or_create_autostart(key, default_autostart_respawn);
+            configure_autostart_command(item, val);
         }
     }
     fclose(f);
@@ -264,9 +472,12 @@ void surface_add(surface_t *surf) {
 }
 
 static void present_framebuffer(int x, int y, int w, int h) {
-    if (fb_fd >= 0 && back_buffer && fb_mem) {
+    if (fb_fd >= 0 && back_buffer) {
         if (w <= 0 || h <= 0) return;
-        copy_box_to_fb(x, y, w, h);
+        struct { int x; int y; int w; int h; } rect = { x, y, w, h };
+        // Tell kernel which region is dirty, then request a present.
+        ioctl(fb_fd, FBIOSET_DIRTY, &rect);
+        ioctl(fb_fd, FBIOPAN_DISPLAY, NULL);
     }
 }
 
@@ -296,11 +507,100 @@ surface_t *surface_find(uint32_t surf_id) {
     return NULL;
 }
 
+static void place_new_toplevel_surface(surface_t *surf) {
+    if (!surf) return;
+
+    int existing_toplevels = 0;
+    surface_t *curr = surface_head;
+    while (curr) {
+        if (curr->layer == 1 || curr->layer == 2) {
+            existing_toplevels++;
+        }
+        curr = curr->next;
+    }
+
+    const int cascade_step = 28;
+    const int cascade_slots = 8;
+    int offset = (existing_toplevels % cascade_slots) * cascade_step;
+
+    int min_x = BORDER_WIDTH;
+    int min_y = TITLEBAR_HEIGHT + BORDER_WIDTH;
+    int max_x = screen_w - (int)surf->w - BORDER_WIDTH;
+    int max_y = screen_h - (int)surf->h - BORDER_WIDTH;
+    if (max_x < min_x) max_x = min_x;
+    if (max_y < min_y) max_y = min_y;
+
+    int x = (screen_w - (int)surf->w) / 2 + offset;
+    int y = (screen_h - (int)surf->h) / 2 + offset;
+
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+    if (x < min_x) x = min_x;
+    if (y < min_y) y = min_y;
+
+    surf->x = x;
+    surf->y = y;
+}
+
 static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *payload, uint32_t size);
+
+static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
+    if (!surf || !surf->mapped) return false;
+
+    struct {
+        uint32_t surface_id;
+        int x, y;
+        uint32_t buttons;
+    } __attribute__((packed)) pl = {
+        surf->surface_id,
+        mx - surf->x,
+        my - surf->y,
+        buttons
+    };
+
+    return send_frame(surf->client_fd, EVT_POINTER, surf->surface_id, &pl, sizeof(pl)) == 0;
+}
+
+static bool send_key_event(surface_t *surf,
+                           NovaKeycode key,
+                           uint32_t modifiers,
+                           bool pressed,
+                           uint32_t codepoint) {
+    if (!surf || !surf->mapped) return false;
+    if (key == KEY_UNKNOWN && codepoint == 0) return false;
+
+    struct {
+        uint32_t surface_id;
+        uint32_t keycode;
+        uint32_t modifiers;
+        uint8_t pressed;
+        uint8_t text_len;
+        char text[5];
+        uint32_t codepoint;
+    } __attribute__((packed)) pl;
+
+    memset(&pl, 0, sizeof(pl));
+    pl.surface_id = surf->surface_id;
+    pl.keycode = key;
+    pl.modifiers = modifiers;
+    pl.pressed = pressed ? 1 : 0;
+    pl.codepoint = codepoint;
+
+    if (pressed && codepoint >= 32) {
+        int len = text_encode_utf8(codepoint, pl.text);
+        if (len > 0 && len <= 4) {
+            pl.text_len = (uint8_t)len;
+            pl.text[len] = '\0';
+        }
+    }
+
+    return send_frame(surf->client_fd, EVT_KEY, surf->surface_id, &pl, sizeof(pl)) == 0;
+}
 
 static uint32_t get_ticks_ms(void) {
     return (uint32_t)sys_system(16 /* SYSTEM_CMD_GET_TICKS */, 0, 0, 0, 0);
 }
+
 
 static void scale_nearest_rgba(uint32_t *dst, uint32_t dst_w, uint32_t dst_h, const uint32_t *src, uint32_t src_w, uint32_t src_h) {
     if (!dst || !src || dst_w == 0 || dst_h == 0 || src_w == 0 || src_h == 0) return;
@@ -460,6 +760,41 @@ surface_t *surface_get_focused(void) {
 }
 
 // Send frame headers to socket clients
+static int send_all(int fd, const void *buf, size_t size) {
+    size_t written = 0;
+    while (written < size) {
+        ssize_t rc = send(fd, (const char *)buf + written, size - written, 0);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return -1;
+        written += (size_t)rc;
+    }
+    return 0;
+}
+
+static int recv_all(int fd, void *buf, size_t size) {
+    size_t read_bytes = 0;
+    while (read_bytes < size) {
+        ssize_t rc = recv(fd, (char *)buf + read_bytes, size - read_bytes, 0);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return -1;
+        read_bytes += (size_t)rc;
+    }
+    return 0;
+}
+
+static int discard_socket_bytes(int fd, uint32_t size) {
+    uint8_t scratch[128];
+    while (size > 0) {
+        uint32_t chunk = size;
+        if (chunk > sizeof(scratch)) chunk = sizeof(scratch);
+        if (recv_all(fd, scratch, chunk) < 0) {
+            return -1;
+        }
+        size -= chunk;
+    }
+    return 0;
+}
+
 static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *payload, uint32_t size) {
     (void)surface_id;
     NovaFrameHeader header;
@@ -469,14 +804,12 @@ static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *pa
     header.msg_type = type;
     header.payload_size = size;
 
-    // Send header
-    if (send(fd, &header, sizeof(header), 0) != sizeof(header)) {
+    if (send_all(fd, &header, sizeof(header)) < 0) {
         return -1;
     }
 
-    // Send payload
     if (size > 0 && payload) {
-        if (send(fd, payload, size, 0) != (ssize_t)size) {
+        if (send_all(fd, payload, size) < 0) {
             return -1;
         }
     }
@@ -485,19 +818,7 @@ static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *pa
 
 // Broadcast window created/destroyed events to OVERLAY docks
 void broadcast_window_event(uint32_t msg_type, surface_t *surf) {
-    struct {
-        uint32_t surface_id;
-        char title[128];
-        uint32_t state_flags;
-        char icon_path[256];
-    } __attribute__((packed)) payload;
-
-    payload.surface_id = surf->surface_id;
-    strncpy(payload.title, surf->title, 127);
-    payload.title[127] = '\0';
-    payload.state_flags = surf->state_flags;
-    strncpy(payload.icon_path, surf->icon_path, 255);
-    payload.icon_path[255] = '\0';
+    if (!surf) return;
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active) {
@@ -505,7 +826,34 @@ void broadcast_window_event(uint32_t msg_type, surface_t *surf) {
             surface_t *c = surface_head;
             while (c) {
                 if (c->client_fd == clients[i].fd && c->layer == 3 /* OVERLAY */) {
-                    send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    if (msg_type == EVT_STATE_CHANGED) {
+                        struct {
+                            uint32_t surface_id;
+                            uint32_t state_flags;
+                        } __attribute__((packed)) payload = {
+                            surf->surface_id,
+                            surf->state_flags
+                        };
+                        send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    } else if (msg_type == EVT_WINDOW_DESTROYED) {
+                        uint32_t payload = surf->surface_id;
+                        send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    } else {
+                        struct {
+                            uint32_t surface_id;
+                            char title[128];
+                            uint32_t state_flags;
+                            char icon_path[256];
+                        } __attribute__((packed)) payload;
+
+                        payload.surface_id = surf->surface_id;
+                        strncpy(payload.title, surf->title, 127);
+                        payload.title[127] = '\0';
+                        payload.state_flags = surf->state_flags;
+                        strncpy(payload.icon_path, surf->icon_path, 255);
+                        payload.icon_path[255] = '\0';
+                        send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
+                    }
                     break;
                 }
                 c = c->next;
@@ -797,14 +1145,17 @@ surface_t *surface_at(int px, int py, int *click_region_out) {
 
 // Autostart Spawner Engine
 void spawn_autostart(int idx) {
+    if (idx < 0 || idx >= autostart_count || autostarts[idx].path[0] == '\0') return;
+
+    const char *args = autostarts[idx].args[0] ? autostarts[idx].args : NULL;
     // Spawn using sys_spawn with terminal and tty-inheritance flags
-    int pid = sys_spawn(autostarts[idx].path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
+    int pid = sys_spawn(autostarts[idx].path, args, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
     if (pid > 0) {
         autostarts[idx].pid = pid;
         autostarts[idx].respawn_at_ms = 0;
         printf("Compositor: Autostart %s spawned (PID %d)\n", autostarts[idx].name, pid);
     } else {
-        printf("Compositor: Failed to spawn autostart %s\n", autostarts[idx].name);
+        printf("Compositor: Failed to spawn autostart %s (%s)\n", autostarts[idx].name, autostarts[idx].path);
         autostarts[idx].pid = 0;
         autostarts[idx].respawn_at_ms = 0;
     }
@@ -889,7 +1240,6 @@ void copy_box_to_fb(int bx, int by, int bw, int bh) {
     int end_y = (by + bh > screen_h) ? screen_h : by + bh;
     int copy_w = end_x - start_x;
     if (copy_w <= 0) return;
-
     for (int y = start_y; y < end_y; y++) {
         uint8_t *fb_row_bytes = (uint8_t*)fb_mem + (uint64_t)y * finfo.line_length;
         uint32_t *fb_row = (uint32_t*)(fb_row_bytes + (uint64_t)start_x * sizeof(uint32_t));
@@ -1010,121 +1360,121 @@ static bool try_fast_translate_drag(surface_t *surf, int old_vis_x, int old_vis_
     return false;
 }
 
-static void blit_surface_pixels(surface_t *surf, uint32_t dst_x, uint32_t dst_y, uint32_t copy_w, uint32_t copy_h) {
-    if (!surf || !surf->pixels || copy_w == 0 || copy_h == 0) return;
+static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_w, int copy_h) {
+    if (!surf || !surf->pixels || copy_w <= 0 || copy_h <= 0) return;
 
+    int draw_x1 = dst_x;
+    int draw_y1 = dst_y;
+    int draw_x2 = dst_x + copy_w;
+    int draw_y2 = dst_y + copy_h;
+
+    if (draw_x1 < surf->x) draw_x1 = surf->x;
+    if (draw_y1 < surf->y) draw_y1 = surf->y;
+    if (draw_x2 > surf->x + (int)surf->w) draw_x2 = surf->x + (int)surf->w;
+    if (draw_y2 > surf->y + (int)surf->h) draw_y2 = surf->y + (int)surf->h;
+    if (draw_x1 < 0) draw_x1 = 0;
+    if (draw_y1 < 0) draw_y1 = 0;
+    if (draw_x2 > screen_w) draw_x2 = screen_w;
+    if (draw_y2 > screen_h) draw_y2 = screen_h;
+
+    int draw_w = draw_x2 - draw_x1;
+    int draw_h = draw_y2 - draw_y1;
+    if (draw_w <= 0 || draw_h <= 0) return;
+
+    int blit_area = draw_w * draw_h;
+
+    int src_x = draw_x1 - surf->x;
+    int src_y = draw_y1 - surf->y;
     bool opaque = (surf->flags & SURFACE_FLAG_TRANSPARENT) == 0;
-    if (!opaque) {
-        ui_blend_pixels(back_buffer, screen_w, screen_h, surf->x, surf->y, surf->pixels, surf->w, surf->h, 1.0f);
-        return;
-    }
 
-    uint32_t src_x = 0;
-    uint32_t src_y = 0;
-    uint32_t draw_x = dst_x;
-    uint32_t draw_y = dst_y;
-    uint32_t draw_w = copy_w;
-    uint32_t draw_h = copy_h;
-
-    if ((int)draw_x < surf->x) {
-        uint32_t delta = (uint32_t)(surf->x - (int)draw_x);
-        src_x += delta;
-        draw_x += delta;
-        draw_w -= delta;
-    }
-    if ((int)draw_y < surf->y) {
-        uint32_t delta = (uint32_t)(surf->y - (int)draw_y);
-        src_y += delta;
-        draw_y += delta;
-        draw_h -= delta;
-    }
-    if (draw_x + draw_w > (uint32_t)screen_w) draw_w = (uint32_t)screen_w - draw_x;
-    if (draw_y + draw_h > (uint32_t)screen_h) draw_h = (uint32_t)screen_h - draw_y;
-    if (draw_w == 0 || draw_h == 0) return;
-
-    for (uint32_t y = 0; y < draw_h; y++) {
-        uint32_t *dst_row = &back_buffer[(draw_y + y) * screen_w + draw_x];
+    for (int y = 0; y < draw_h; y++) {
+        uint32_t *dst_row = &back_buffer[(draw_y1 + y) * screen_w + draw_x1];
         uint32_t *src_row = &surf->pixels[(src_y + y) * surf->w + src_x];
-        memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
+        if (opaque) {
+            memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
+            continue;
+        }
+
+        for (int x = 0; x < draw_w; x++) {
+            uint32_t src_pixel = src_row[x];
+            uint32_t src_a = (src_pixel >> 24) & 0xFF;
+            if (src_a == 0) continue;
+            if (src_a == 255) {
+                dst_row[x] = src_pixel;
+                continue;
+            }
+
+            uint32_t dst_pixel = dst_row[x];
+            uint32_t dst_a = (dst_pixel >> 24) & 0xFF;
+            uint32_t out_a = src_a + dst_a * (255 - src_a) / 255;
+            if (out_a == 0) continue;
+
+            uint32_t src_r = (src_pixel >> 16) & 0xFF;
+            uint32_t src_g = (src_pixel >> 8) & 0xFF;
+            uint32_t src_b = src_pixel & 0xFF;
+            uint32_t dst_r = (dst_pixel >> 16) & 0xFF;
+            uint32_t dst_g = (dst_pixel >> 8) & 0xFF;
+            uint32_t dst_b = dst_pixel & 0xFF;
+
+            uint32_t out_r = (src_r * src_a + dst_r * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_g = (src_g * src_a + dst_g * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_b = (src_b * src_a + dst_b * dst_a * (255 - src_a) / 255) / out_a;
+
+            dst_row[x] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+        }
     }
+
+    (void)blit_area;
 }
 
 void update_cursor_atomic_combined(int new_x, int new_y) {
     int cursor_w = 12;
     int cursor_h = 19;
-    
+
     // Calculate combined bounding box of old and new cursor
     int min_x = new_x;
     int min_y = new_y;
     int max_x = new_x + cursor_w;
     int max_y = new_y + cursor_h;
-    
+
     if (cursor_visible) {
         if (last_cursor_x < min_x) min_x = last_cursor_x;
         if (last_cursor_y < min_y) min_y = last_cursor_y;
         if (last_cursor_x + cursor_w > max_x) max_x = last_cursor_x + cursor_w;
         if (last_cursor_y + cursor_h > max_y) max_y = last_cursor_y + cursor_h;
     }
-    
+
     // Clamp to screen boundaries
     if (min_x < 0) min_x = 0;
     if (min_y < 0) min_y = 0;
     if (max_x > screen_w) max_x = screen_w;
     if (max_y > screen_h) max_y = screen_h;
-    
+
     int bw = max_x - min_x;
     int bh = max_y - min_y;
-    
+
     if (bw <= 0 || bh <= 0) return;
-    
-    // 1. Save clean pixels under the new cursor from back_buffer
-    uint32_t saved_pixels[12 * 19];
-    for (int y = 0; y < cursor_h; y++) {
-        int py = new_y + y;
-        uint32_t *bb_row = (py >= 0 && py < screen_h) ? &back_buffer[py * screen_w] : NULL;
-        for (int x = 0; x < cursor_w; x++) {
-            int px = new_x + x;
-            if (bb_row && px >= 0 && px < screen_w) {
-                saved_pixels[y * cursor_w + x] = bb_row[px];
-            } else {
-                saved_pixels[y * cursor_w + x] = 0xFF1E1E2E; // Fallback
-            }
-        }
-    }
-    
-    // 2. Draw the cursor onto the back_buffer temporarily
-    draw_cursor(back_buffer, screen_w, screen_h, new_x, new_y);
-    
-    // 3. Copy the COMBINED bounding box to the screen (fb_mem)
-    copy_box_to_fb(min_x, min_y, bw, bh);
-    
-    // 4. Restore the clean pixels back to back_buffer
-    for (int y = 0; y < cursor_h; y++) {
-        int py = new_y + y;
-        if (py >= 0 && py < screen_h) {
-            uint32_t *bb_row = &back_buffer[py * screen_w];
-            for (int x = 0; x < cursor_w; x++) {
-                int px = new_x + x;
-                if (px >= 0 && px < screen_w) {
-                    bb_row[px] = saved_pixels[y * cursor_w + x];
-                }
-            }
-        }
-    }
-    
-    // 5. Update state
-    last_cursor_x = new_x;
-    last_cursor_y = new_y;
-    cursor_visible = true;
+
+    compositor_composite_region(min_x, min_y, bw, bh);
 }
 
 // Compositor Render Loop
 void compositor_composite(void) {
+    int cursor_w = 12;
+    int cursor_h = 19;
+
+    if (has_dirty_rect) {
+        mark_dirty_rect(mx, my, cursor_w, cursor_h);
+        if (cursor_visible) {
+            mark_dirty_rect(last_cursor_x, last_cursor_y, cursor_w, cursor_h);
+        }
+    }
+
     int render_x = 0;
     int render_y = 0;
     int render_w = screen_w;
     int render_h = screen_h;
-    bool partial_render = has_dirty_rect && dirty_w > 0 && dirty_h > 0;
+    bool partial_render = false;
 
     if (partial_render) {
         render_x = dirty_x;
@@ -1165,10 +1515,19 @@ void compositor_composite(void) {
                 }
 
                 bool has_decorations = (layer == 1 || layer == 2);
+                bool dirty_inside_content =
+                    partial_render &&
+                    render_x >= curr->x &&
+                    render_y >= curr->y &&
+                    render_x + render_w <= curr->x + (int)curr->w &&
+                    render_y + render_h <= curr->y + (int)curr->h;
+                bool draw_decorations =
+                    has_decorations &&
+                    (!partial_render || !dirty_inside_content || (curr->flags & SURFACE_FLAG_TRANSPARENT));
                 uint32_t border_color = curr->focused ? active_border : inactive_border;
 
                 // Render titlebar if NORMAL or FLOATING window
-                if (has_decorations) {
+                if (draw_decorations) {
                     // 1. Draw flat content border outline below the titlebar
                     ui_draw_panel(back_buffer, screen_w, screen_h, 
                                   curr->x - BORDER_WIDTH, curr->y,
@@ -1230,7 +1589,16 @@ void compositor_composite(void) {
                 if (blend_pixels) {
                     surface_t temp = *curr;
                     temp.pixels = blend_pixels;
-                    blit_surface_pixels(&temp, curr->x, curr->y, curr->w, curr->h);
+                    if (partial_render) {
+                        int ix = 0, iy = 0, iw = 0, ih = 0;
+                        if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
+                                           render_x, render_y, render_w, render_h,
+                                           &ix, &iy, &iw, &ih)) {
+                            blit_surface_pixels(&temp, ix, iy, iw, ih);
+                        }
+                    } else {
+                        blit_surface_pixels(&temp, curr->x, curr->y, (int)curr->w, (int)curr->h);
+                    }
                 }
             }
             curr = curr->next;
@@ -1238,8 +1606,6 @@ void compositor_composite(void) {
     }
 
     // 1. Save clean pixels under the new cursor from back_buffer
-    int cursor_w = 12;
-    int cursor_h = 19;
     uint32_t saved_pixels[12 * 19];
     for (int y = 0; y < cursor_h; y++) {
         int py = my + y;
@@ -1257,37 +1623,7 @@ void compositor_composite(void) {
     // 2. Draw the cursor onto the back_buffer temporarily
     draw_cursor(back_buffer, screen_w, screen_h, mx, my);
 
-    // 3. Expand dirty rect if it exists to cover the old cursor and new cursor
-    if (has_dirty_rect) {
-        int min_x = dirty_x;
-        int min_y = dirty_y;
-        int max_x = dirty_x + dirty_w;
-        int max_y = dirty_y + dirty_h;
-
-        if (mx < min_x) min_x = mx;
-        if (my < min_y) min_y = my;
-        if (mx + cursor_w > max_x) max_x = mx + cursor_w;
-        if (my + cursor_h > max_y) max_y = my + cursor_h;
-
-        if (cursor_visible) {
-            if (last_cursor_x < min_x) min_x = last_cursor_x;
-            if (last_cursor_y < min_y) min_y = last_cursor_y;
-            if (last_cursor_x + cursor_w > max_x) max_x = last_cursor_x + cursor_w;
-            if (last_cursor_y + cursor_h > max_y) max_y = last_cursor_y + cursor_h;
-        }
-
-        if (min_x < 0) min_x = 0;
-        if (min_y < 0) min_y = 0;
-        if (max_x > screen_w) max_x = screen_w;
-        if (max_y > screen_h) max_y = screen_h;
-
-        dirty_x = min_x;
-        dirty_y = min_y;
-        dirty_w = max_x - min_x;
-        dirty_h = max_y - min_y;
-    }
-
-    // 4. Blit backbuffer directly to hardware framebuffer mapped address space
+    // 3. Blit backbuffer directly to hardware framebuffer mapped address space
     if (has_dirty_rect) {
         copy_box_to_fb(dirty_x, dirty_y, dirty_w, dirty_h);
         has_dirty_rect = false; // Reset
@@ -1297,7 +1633,7 @@ void compositor_composite(void) {
         }
     }
 
-    // 5. Restore the clean pixels back to back_buffer
+    // 4. Restore the clean pixels back to back_buffer
     for (int y = 0; y < cursor_h; y++) {
         int py = my + y;
         if (py >= 0 && py < screen_h) {
@@ -1311,10 +1647,11 @@ void compositor_composite(void) {
         }
     }
 
-    // 6. Update state
+    // 5. Update state
     last_cursor_x = mx;
     last_cursor_y = my;
     cursor_visible = true;
+    
 }
 
 // Client IPC message handlers
@@ -1322,7 +1659,9 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     NovaFrameHeader header;
     uint8_t buffer[1024];
 
-    if (recv(fd, &header, sizeof(header), 0) != sizeof(header)) {
+    memset(buffer, 0, sizeof(buffer));
+
+    if (recv_all(fd, &header, sizeof(header)) < 0) {
         return;
     }
 
@@ -1333,12 +1672,15 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     if (header.payload_size > 0) {
         uint32_t to_read = header.payload_size;
         if (to_read > sizeof(buffer)) to_read = sizeof(buffer);
-        
-        uint32_t read_bytes = 0;
-        while (read_bytes < to_read) {
-            ssize_t rc = recv(fd, (char*)buffer + read_bytes, to_read - read_bytes, 0);
-            if (rc <= 0) return;
-            read_bytes += rc;
+
+        if (recv_all(fd, buffer, to_read) < 0) {
+            return;
+        }
+
+        if (header.payload_size > to_read) {
+            if (discard_socket_bytes(fd, header.payload_size - to_read) < 0) {
+                return;
+            }
         }
     }
 
@@ -1370,27 +1712,13 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (shm_fd >= 0) {
                 uint32_t sz = p->w * p->h * 4;
                 surf->shm_size = sz;
-                
-                // Write zeros to pre-allocate size on shmfs VFS
-                uint8_t *zeros = malloc(4096);
-                memset(zeros, 0, 4096);
-                uint32_t written = 0;
-                while (written < sz) {
-                    uint32_t chunk = (sz - written > 4096) ? 4096 : (sz - written);
-                    write(shm_fd, zeros, chunk);
-                    written += chunk;
-                }
-                free(zeros);
-
                 surf->pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
                 close(shm_fd);
             }
 
             // Window decoration rules (Normal windows are centered, overlaid layers at 0,0)
             if (surf->layer == 1 || surf->layer == 2) {
-                surf->x = (screen_w - (int)surf->w) / 2;
-                surf->y = (screen_h - (int)surf->h) / 2;
-                if (surf->y < TITLEBAR_HEIGHT) surf->y = TITLEBAR_HEIGHT;
+                place_new_toplevel_surface(surf);
                 strcpy(surf->title, "Application Window");
             } else {
                 surf->x = 0;
@@ -1433,16 +1761,6 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                 int shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT, 0777);
                 if (shm_fd >= 0) {
                     uint32_t sz = p->w * p->h * 4;
-                    uint8_t *zeros = malloc(4096);
-                    memset(zeros, 0, 4096);
-                    uint32_t written = 0;
-                    while (written < sz) {
-                        uint32_t chunk = (sz - written > 4096) ? 4096 : (sz - written);
-                        write(shm_fd, zeros, chunk);
-                        written += chunk;
-                    }
-                    free(zeros);
-
                     surf->pending_pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
                     close(shm_fd);
                 }
@@ -1461,6 +1779,13 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             uint32_t surf_id = *(uint32_t *)buffer;
             surface_t *surf = surface_find(surf_id);
             if (surf) {
+                uint32_t rect_count = 0;
+                if (header.payload_size >= 8) {
+                    rect_count = *(uint32_t *)(buffer + 4);
+                    uint32_t max_rects = (header.payload_size - 8) / sizeof(NovaRect);
+                    if (rect_count > max_rects) rect_count = max_rects;
+                }
+
                 if (!surf->mapped) {
                     surf->mapped = true;
                 }
@@ -1486,6 +1811,38 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     if (surf->resize_request_queued) {
                         queue_resize_request(surf, surf->resize_desired_w, surf->resize_desired_h, surf->resize_force_next_request);
                     }
+                }
+
+                if (surf->flags & SURFACE_FLAG_TRANSPARENT) {
+                    int vx = 0, vy = 0, vw = 0, vh = 0;
+                    surface_visual_bounds(surf, &vx, &vy, &vw, &vh);
+                    mark_dirty_rect(vx, vy, vw, vh);
+                } else if (rect_count > 0) {
+                    const NovaRect *rects = (const NovaRect *)(buffer + 8);
+                    int surf_w = (int)surf->w;
+                    int surf_h = (int)surf->h;
+
+                    for (uint32_t i = 0; i < rect_count; i++) {
+                        int rx = rects[i].x;
+                        int ry = rects[i].y;
+                        int rw = (int)rects[i].w;
+                        int rh = (int)rects[i].h;
+
+                        if (rw <= 0 || rh <= 0 || rx >= surf_w || ry >= surf_h) continue;
+                        if (rx < 0) {
+                            rw += rx;
+                            rx = 0;
+                        }
+                        if (ry < 0) {
+                            rh += ry;
+                            ry = 0;
+                        }
+                        if (rx + rw > surf_w) rw = surf_w - rx;
+                        if (ry + rh > surf_h) rh = surf_h - ry;
+                        mark_dirty_rect(surf->x + rx, surf->y + ry, rw, rh);
+                    }
+                } else {
+                    mark_dirty_rect(surf->x, surf->y, (int)surf->w, (int)surf->h);
                 }
             }
             break;
@@ -1536,6 +1893,13 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (surf) {
                 strncpy(surf->title, p->title, 127);
                 surf->title[127] = '\0';
+                if (surf->layer == 1 || surf->layer == 2) {
+                    mark_dirty_rect(surf->x - BORDER_WIDTH,
+                                    surf->y - TITLEBAR_HEIGHT - BORDER_WIDTH,
+                                    (int)surf->w + BORDER_WIDTH * 2,
+                                    TITLEBAR_HEIGHT + BORDER_WIDTH);
+                    needs_composite = true;
+                }
                 broadcast_window_event(EVT_WINDOW_TITLE_CHANGED, surf);
             }
             break;
@@ -1711,7 +2075,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Open Exclusive Inputs
+    // Open raw keyboard input. Nova owns layout and UTF-8 translation.
     int kbd_fd = open("/dev/keyboard", O_RDONLY | O_NONBLOCK);
     int mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
     if (mouse_fd >= 0) {
@@ -1767,7 +2131,7 @@ int main(int argc, char *argv[]) {
         // Collect fds for sys_poll
         int fd_idx = 0;
         
-        // 0. Keyboard device
+        // 0. Raw keyboard device
         if (kbd_fd >= 0) {
             poll_fds[fd_idx].fd = kbd_fd;
             poll_fds[fd_idx].events = POLLIN;
@@ -1842,7 +2206,7 @@ int main(int argc, char *argv[]) {
 
         for (int i = 0; i < fd_idx; i++) {
             if (poll_fds[i].revents & POLLIN) {
-                // 0. Keyboard event
+                // 0. Raw keyboard event
                 if (poll_fds[i].fd == kbd_fd) {
                     uint8_t scancode;
                     while (read(kbd_fd, &scancode, 1) == 1) {
@@ -1853,45 +2217,40 @@ int main(int argc, char *argv[]) {
 
                         bool pressed = !(scancode & 0x80);
                         uint8_t base_sc = scancode & 0x7F;
+                        bool extended = e0_prefix;
+                        e0_prefix = false;
 
                         // Track modifiers
-                        if (base_sc == 0x2A || base_sc == 0x36) shift_pressed = pressed;
-                        else if (base_sc == 0x1D) ctrl_pressed = pressed;
-                        else if (base_sc == 0x38) alt_pressed = pressed;
+                        if (!extended && (base_sc == 0x2A || base_sc == 0x36)) {
+                            shift_pressed = pressed;
+                        } else if (base_sc == 0x1D) {
+                            ctrl_pressed = pressed;
+                        } else if (!extended && base_sc == 0x38) {
+                            alt_pressed = pressed;
+                        } else if (extended && base_sc == 0x38) {
+                            altgr_pressed = pressed;
+                        } else if (!extended && base_sc == 0x3A && pressed) {
+                            caps_lock = !caps_lock;
+                        }
 
-                        NovaKeycode key = KEY_UNKNOWN;
-                        if (e0_prefix) {
-                            if (base_sc < sizeof(scancode_to_novakey_ext)/sizeof(scancode_to_novakey_ext[0])) {
-                                key = scancode_to_novakey_ext[base_sc];
-                            }
-                            e0_prefix = false;
-                        } else {
-                            if (base_sc < sizeof(scancode_to_novakey)/sizeof(scancode_to_novakey[0])) {
-                                key = scancode_to_novakey[base_sc];
-                            }
+                        NovaKeycode key = raw_scancode_to_keycode(base_sc, extended);
+                        uint32_t modifiers = keyboard_modifiers();
+                        uint32_t codepoint = 0;
+                        if (pressed && !extended) {
+                            codepoint = nova_keymap_codepoint(active_keymap, base_sc, modifiers);
                         }
 
                         // Global hotkeys
-                        if (pressed && key == KEY_Q && shift_pressed && alt_pressed) {
+                        if (pressed && key == KEY_Q &&
+                            (modifiers & NOVA_KMOD_SHIFT) &&
+                            (modifiers & NOVA_KMOD_ALT)) {
                             quit_loop = true;
                         }
 
                         // Dispatch to focused window
                         surface_t *focused = surface_get_focused();
-                        if (!quit_loop && focused && key != KEY_UNKNOWN) {
-                            uint32_t modifiers = 0;
-                            if (shift_pressed) modifiers |= 0x1;
-                            if (ctrl_pressed) modifiers |= 0x2;
-                            if (alt_pressed) modifiers |= 0x4;
-
-                            struct {
-                                uint32_t surface_id;
-                                uint32_t keycode;
-                                uint32_t modifiers;
-                                uint8_t pressed;
-                            } __attribute__((packed)) pl = {focused->surface_id, key, modifiers, pressed ? 1 : 0};
-
-                            send_frame(focused->client_fd, EVT_KEY, focused->surface_id, &pl, sizeof(pl));
+                        if (!quit_loop && focused) {
+                            send_key_event(focused, key, modifiers, pressed, codepoint);
                         }
                     }
                 }
@@ -1922,6 +2281,11 @@ int main(int argc, char *argv[]) {
                             surface_t *hovered = NULL;
 
                             surface_t *focused = surface_get_focused();
+                            surface_t *grabbed = pointer_grab_surface_id ? surface_find(pointer_grab_surface_id) : NULL;
+                            if (pointer_grab_surface_id && !grabbed) {
+                                pointer_grab_surface_id = 0;
+                            }
+
                             bool active_drag = left_pressed && last_left_pressed && focused && (focused->is_dragging || focused->is_resizing);
                             if (!active_drag) {
                                 hovered = surface_at(mx, my, &click_region);
@@ -1977,12 +2341,8 @@ int main(int argc, char *argv[]) {
                                             needs_composite = true;
                                         } else if (click_region == 0) {
                                             // Content click: route pointer event
-                                            struct {
-                                                uint32_t surface_id;
-                                                int x, y;
-                                                uint32_t buttons;
-                                            } __attribute__((packed)) pl = {hovered->surface_id, mx - hovered->x, my - hovered->y, flags & 0x7};
-                                            send_frame(hovered->client_fd, EVT_POINTER, hovered->surface_id, &pl, sizeof(pl));
+                                            pointer_grab_surface_id = hovered->surface_id;
+                                            send_pointer_event(hovered, flags & 0x7);
                                         }
                                     } else {
                                         // Clicked background: unfocus active window
@@ -2013,14 +2373,15 @@ int main(int argc, char *argv[]) {
                                         } else {
                                             needs_composite = true;
                                         }
-                                    } else if (hovered && click_region == 0) {
+                                    } else {
                                         // Continuous content pointer moves
-                                        struct {
-                                            uint32_t surface_id;
-                                            int x, y;
-                                            uint32_t buttons;
-                                        } __attribute__((packed)) pl = {hovered->surface_id, mx - hovered->x, my - hovered->y, flags & 0x7};
-                                        send_frame(hovered->client_fd, EVT_POINTER, hovered->surface_id, &pl, sizeof(pl));
+                                        surface_t *target = grabbed;
+                                        if (!target && hovered && click_region == 0) {
+                                            target = hovered;
+                                        }
+                                        if (target) {
+                                            send_pointer_event(target, flags & 0x7);
+                                        }
                                     }
                                 }
                             } else {
@@ -2036,26 +2397,22 @@ int main(int argc, char *argv[]) {
                                         c->is_resizing = false;
                                         c = c->next;
                                     }
-                                }
 
-                                // Normal pointer movements (hover routing)
-                                if (hovered && click_region == 0) {
-                                    struct {
-                                        uint32_t surface_id;
-                                        int x, y;
-                                        uint32_t buttons;
-                                    } __attribute__((packed)) pl = {hovered->surface_id, mx - hovered->x, my - hovered->y, 0};
-                                    send_frame(hovered->client_fd, EVT_POINTER, hovered->surface_id, &pl, sizeof(pl));
+                                    surface_t *target = grabbed;
+                                    if (!target && hovered && click_region == 0) {
+                                        target = hovered;
+                                    }
+                                    if (target) {
+                                        send_pointer_event(target, 0);
+                                    }
                                 }
+                                pointer_grab_surface_id = 0;
                             }
 
                             if ((dx != 0 || dy != 0) && !fast_drag_handled) {
                                 if (!needs_composite) {
                                     needs_cursor_only = true;
                                 }
-                            }
-                            if (left_pressed != last_left_pressed) {
-                                needs_composite = true;
                             }
                             last_left_pressed = left_pressed;
                             mouse_idx = 0;
@@ -2263,6 +2620,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Clean up
+    if (kbd_fd >= 0) close(kbd_fd);
+    if (mouse_fd >= 0) close(mouse_fd);
     close(server_fd);
     unlink("/tmp/nova.sock");
     munmap(fb_mem, fb_size);

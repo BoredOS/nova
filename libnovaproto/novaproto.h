@@ -65,7 +65,14 @@ typedef struct {
     uint32_t surface_id;
     union {
         struct { int x, y; uint32_t buttons; } pointer; // Coordinates relative to top-left of content area
-        struct { uint32_t keycode; uint32_t modifiers; uint8_t pressed; } key;
+        struct {
+            uint32_t keycode;
+            uint32_t modifiers;
+            uint8_t pressed;
+            uint8_t text_len;
+            char text[5];
+            uint32_t codepoint;
+        } key;
         struct { uint32_t w, h; } resize;
         struct { uint32_t state_flags; } state;
         struct { char title[128]; uint32_t state_flags; char icon_path[256]; } window;

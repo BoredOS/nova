@@ -1450,7 +1450,7 @@ void compositor_composite(void) {
     int render_y = 0;
     int render_w = screen_w;
     int render_h = screen_h;
-    bool partial_render = has_dirty_rect && dirty_w > 0 && dirty_h > 0;
+    bool partial_render = false;
 
     if (partial_render) {
         render_x = dirty_x;

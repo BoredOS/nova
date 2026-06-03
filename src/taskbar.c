@@ -912,12 +912,14 @@ static void perform_menu_action(int action_idx) {
     }
 }
 
-static void launch_selected_app(void) {
+static bool launch_selected_app(void) {
     if (selected_idx >= 0 && selected_idx < filtered_count) {
         char full_path[256];
         snprintf(full_path, sizeof(full_path), "/bin/%s", filtered_apps[selected_idx].filename);
-        sys_spawn(full_path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
+        int pid = sys_spawn(full_path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
+        return pid > 0;
     }
+    return false;
 }
 
 static void reset_menu_search(void) {
@@ -1041,7 +1043,9 @@ static void handle_menu_click(int click_x, int click_y) {
             click_y >= y && click_y < y + ITEM_HEIGHT) {
             selected_idx = i;
             draw_menu();
-            launch_selected_app();
+            if (launch_selected_app()) {
+                resume_focus_id = 0;
+            }
             close_menu();
             return;
         }
@@ -1071,7 +1075,9 @@ static void handle_menu_key(const NovaEvent *ev) {
         }
     } else if (kc == KEY_ENTER) {
         if (selected_idx >= 0 && selected_idx < filtered_count) {
-            launch_selected_app();
+            if (launch_selected_app()) {
+                resume_focus_id = 0;
+            }
             close_menu();
         }
     } else if (kc == KEY_BACKSPACE) {

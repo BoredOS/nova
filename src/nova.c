@@ -1406,70 +1406,32 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
 void update_cursor_atomic_combined(int new_x, int new_y) {
     int cursor_w = 12;
     int cursor_h = 19;
-    
+
     // Calculate combined bounding box of old and new cursor
     int min_x = new_x;
     int min_y = new_y;
     int max_x = new_x + cursor_w;
     int max_y = new_y + cursor_h;
-    
+
     if (cursor_visible) {
         if (last_cursor_x < min_x) min_x = last_cursor_x;
         if (last_cursor_y < min_y) min_y = last_cursor_y;
         if (last_cursor_x + cursor_w > max_x) max_x = last_cursor_x + cursor_w;
         if (last_cursor_y + cursor_h > max_y) max_y = last_cursor_y + cursor_h;
     }
-    
+
     // Clamp to screen boundaries
     if (min_x < 0) min_x = 0;
     if (min_y < 0) min_y = 0;
     if (max_x > screen_w) max_x = screen_w;
     if (max_y > screen_h) max_y = screen_h;
-    
+
     int bw = max_x - min_x;
     int bh = max_y - min_y;
-    
+
     if (bw <= 0 || bh <= 0) return;
-    
-    // 1. Save clean pixels under the new cursor from back_buffer
-    uint32_t saved_pixels[12 * 19];
-    for (int y = 0; y < cursor_h; y++) {
-        int py = new_y + y;
-        uint32_t *bb_row = (py >= 0 && py < screen_h) ? &back_buffer[py * screen_w] : NULL;
-        for (int x = 0; x < cursor_w; x++) {
-            int px = new_x + x;
-            if (bb_row && px >= 0 && px < screen_w) {
-                saved_pixels[y * cursor_w + x] = bb_row[px];
-            } else {
-                saved_pixels[y * cursor_w + x] = 0xFF1E1E2E; // Fallback
-            }
-        }
-    }
-    
-    // 2. Draw the cursor onto the back_buffer temporarily
-    draw_cursor(back_buffer, screen_w, screen_h, new_x, new_y);
-    
-    // 3. Copy the COMBINED bounding box to the screen (fb_mem)
-    copy_box_to_fb(min_x, min_y, bw, bh);
-    
-    // 4. Restore the clean pixels back to back_buffer
-    for (int y = 0; y < cursor_h; y++) {
-        int py = new_y + y;
-        if (py >= 0 && py < screen_h) {
-            uint32_t *bb_row = &back_buffer[py * screen_w];
-            for (int x = 0; x < cursor_w; x++) {
-                int px = new_x + x;
-                if (px >= 0 && px < screen_w) {
-                    bb_row[px] = saved_pixels[y * cursor_w + x];
-                }
-            }
-        }
-    }
-    
-    // 5. Update state
-    last_cursor_x = new_x;
-    last_cursor_y = new_y;
-    cursor_visible = true;
+
+    compositor_composite_region(min_x, min_y, bw, bh);
 }
 
 // Compositor Render Loop

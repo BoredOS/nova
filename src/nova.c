@@ -771,6 +771,30 @@ static int send_all(int fd, const void *buf, size_t size) {
     return 0;
 }
 
+static int recv_all(int fd, void *buf, size_t size) {
+    size_t read_bytes = 0;
+    while (read_bytes < size) {
+        ssize_t rc = recv(fd, (char *)buf + read_bytes, size - read_bytes, 0);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return -1;
+        read_bytes += (size_t)rc;
+    }
+    return 0;
+}
+
+static int discard_socket_bytes(int fd, uint32_t size) {
+    uint8_t scratch[128];
+    while (size > 0) {
+        uint32_t chunk = size;
+        if (chunk > sizeof(scratch)) chunk = sizeof(scratch);
+        if (recv_all(fd, scratch, chunk) < 0) {
+            return -1;
+        }
+        size -= chunk;
+    }
+    return 0;
+}
+
 static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *payload, uint32_t size) {
     (void)surface_id;
     NovaFrameHeader header;
@@ -1635,7 +1659,9 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     NovaFrameHeader header;
     uint8_t buffer[1024];
 
-    if (recv(fd, &header, sizeof(header), 0) != sizeof(header)) {
+    memset(buffer, 0, sizeof(buffer));
+
+    if (recv_all(fd, &header, sizeof(header)) < 0) {
         return;
     }
 
@@ -1646,12 +1672,15 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     if (header.payload_size > 0) {
         uint32_t to_read = header.payload_size;
         if (to_read > sizeof(buffer)) to_read = sizeof(buffer);
-        
-        uint32_t read_bytes = 0;
-        while (read_bytes < to_read) {
-            ssize_t rc = recv(fd, (char*)buffer + read_bytes, to_read - read_bytes, 0);
-            if (rc <= 0) return;
-            read_bytes += rc;
+
+        if (recv_all(fd, buffer, to_read) < 0) {
+            return;
+        }
+
+        if (header.payload_size > to_read) {
+            if (discard_socket_bytes(fd, header.payload_size - to_read) < 0) {
+                return;
+            }
         }
     }
 

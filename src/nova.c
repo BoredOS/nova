@@ -1436,6 +1436,16 @@ void update_cursor_atomic_combined(int new_x, int new_y) {
 
 // Compositor Render Loop
 void compositor_composite(void) {
+    int cursor_w = 12;
+    int cursor_h = 19;
+
+    if (has_dirty_rect) {
+        mark_dirty_rect(mx, my, cursor_w, cursor_h);
+        if (cursor_visible) {
+            mark_dirty_rect(last_cursor_x, last_cursor_y, cursor_w, cursor_h);
+        }
+    }
+
     int render_x = 0;
     int render_y = 0;
     int render_w = screen_w;
@@ -1572,8 +1582,6 @@ void compositor_composite(void) {
     }
 
     // 1. Save clean pixels under the new cursor from back_buffer
-    int cursor_w = 12;
-    int cursor_h = 19;
     uint32_t saved_pixels[12 * 19];
     for (int y = 0; y < cursor_h; y++) {
         int py = my + y;
@@ -1591,37 +1599,7 @@ void compositor_composite(void) {
     // 2. Draw the cursor onto the back_buffer temporarily
     draw_cursor(back_buffer, screen_w, screen_h, mx, my);
 
-    // 3. Expand dirty rect if it exists to cover the old cursor and new cursor
-    if (has_dirty_rect) {
-        int min_x = dirty_x;
-        int min_y = dirty_y;
-        int max_x = dirty_x + dirty_w;
-        int max_y = dirty_y + dirty_h;
-
-        if (mx < min_x) min_x = mx;
-        if (my < min_y) min_y = my;
-        if (mx + cursor_w > max_x) max_x = mx + cursor_w;
-        if (my + cursor_h > max_y) max_y = my + cursor_h;
-
-        if (cursor_visible) {
-            if (last_cursor_x < min_x) min_x = last_cursor_x;
-            if (last_cursor_y < min_y) min_y = last_cursor_y;
-            if (last_cursor_x + cursor_w > max_x) max_x = last_cursor_x + cursor_w;
-            if (last_cursor_y + cursor_h > max_y) max_y = last_cursor_y + cursor_h;
-        }
-
-        if (min_x < 0) min_x = 0;
-        if (min_y < 0) min_y = 0;
-        if (max_x > screen_w) max_x = screen_w;
-        if (max_y > screen_h) max_y = screen_h;
-
-        dirty_x = min_x;
-        dirty_y = min_y;
-        dirty_w = max_x - min_x;
-        dirty_h = max_y - min_y;
-    }
-
-    // 4. Blit backbuffer directly to hardware framebuffer mapped address space
+    // 3. Blit backbuffer directly to hardware framebuffer mapped address space
     if (has_dirty_rect) {
         copy_box_to_fb(dirty_x, dirty_y, dirty_w, dirty_h);
         has_dirty_rect = false; // Reset
@@ -1631,7 +1609,7 @@ void compositor_composite(void) {
         }
     }
 
-    // 5. Restore the clean pixels back to back_buffer
+    // 4. Restore the clean pixels back to back_buffer
     for (int y = 0; y < cursor_h; y++) {
         int py = my + y;
         if (py >= 0 && py < screen_h) {
@@ -1645,7 +1623,7 @@ void compositor_composite(void) {
         }
     }
 
-    // 6. Update state
+    // 5. Update state
     last_cursor_x = mx;
     last_cursor_y = my;
     cursor_visible = true;

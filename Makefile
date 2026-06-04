@@ -125,8 +125,11 @@ bup: all
 	for f in $(APPS); do if [ -f "$$f" ]; then cp $$f build/package/bin/; fi; done; \
 	if [ -d assets ]; then cp -a assets/* build/package/config/; fi; \
 	if [ -f assets/nova.conf ]; then cp assets/nova.conf build/package/config/; fi; \
+	if [ -d pack/scripts ]; then cp -a pack/scripts build/package/; fi; \
 	mkdir -p build; OUT=build/$$BUPNAME; \
-	tar --lz4 -C build/package -cf $$OUT MANIFEST.toml bin config; \
+	SRCDIRS="MANIFEST.toml bin config"; \
+	if [ -d build/package/scripts ]; then SRCDIRS="$$SRCDIRS scripts"; fi; \
+	tar --lz4 -C build/package -cf $$OUT $$SRCDIRS; \
 	echo "Created $$OUT"; \
 	rm -rf build/package'
 

@@ -377,6 +377,12 @@ static void configure_autostart_command(autostart_t *item, const char *command) 
 // Nova config INI parser
 void load_nova_config(const char *path) {
     FILE *f = fopen(path, "r");
+    if (!f && strcmp(path, "/etc/nova/nova.conf") == 0) {
+        f = fopen("/Library/conf/nova.conf", "r");
+    }
+    if (!f && strcmp(path, "/Library/conf/nova.conf") == 0) {
+        f = fopen("/etc/nova/nova.conf", "r");
+    }
     if (!f) return;
 
     autostart_count = 0;

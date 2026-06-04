@@ -35,6 +35,12 @@ static void load_wallpaper_path(const char *path, char *out_path, size_t max_len
     out_path[max_len - 1] = '\0';
 
     FILE *f = fopen(path, "r");
+    if (!f && strcmp(path, "/etc/nova/wallpaper.conf") == 0) {
+        f = fopen("/Library/conf/wallpaper.conf", "r");
+    }
+    if (!f && strcmp(path, "/Library/conf/wallpaper.conf") == 0) {
+        f = fopen("/etc/nova/wallpaper.conf", "r");
+    }
     if (!f) return;
 
     char line[256];
@@ -132,7 +138,7 @@ int main(int argc, char *argv[]) {
     theme_load("/etc/nova/nova.conf", &theme);
 
     char wallpaper_path[256];
-    load_wallpaper_path("/Library/conf/wallpaper.conf", wallpaper_path, sizeof(wallpaper_path));
+    load_wallpaper_path("/etc/nova/wallpaper.conf", wallpaper_path, sizeof(wallpaper_path));
 
     int fd = nova_connect(NULL);
     if (fd < 0) {

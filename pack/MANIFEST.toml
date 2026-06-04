@@ -5,5 +5,5 @@ author = "BoredOS Official"
 license = "GPLv3"
 
 [install]
-bin = "/usr/bin"
-config = "/Library/conf"
+bin = "/bin"
+config = "/etc/nova"

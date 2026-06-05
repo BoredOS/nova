@@ -90,6 +90,7 @@ static int g_rows = DEFAULT_ROWS;
 static int g_win_w = DEFAULT_COLS * 8;
 static int g_win_h = TAB_BAR_H + (DEFAULT_ROWS * 10);
 static int g_font_size = 14;
+static char g_status_message[160];
 
 static void terminal_resize(int w, int h);
 
@@ -1002,10 +1003,16 @@ static void close_tab(int idx) {
 }
 
 static int create_tab(void) {
-    if (g_tab_count >= MAX_TABS) return -1;
+    if (g_tab_count >= MAX_TABS) {
+        str_copy(g_status_message, "Maximum tab count reached.", sizeof(g_status_message));
+        return -1;
+    }
 
     int tty_id = sys_tty_create();
-    if (tty_id < 0) return -1;
+    if (tty_id < 0) {
+        str_copy(g_status_message, "No free TTY: all kernel TTY slots are already occupied.", sizeof(g_status_message));
+        return -1;
+    }
 
     char start_dir[256];
     start_dir[0] = 0;
@@ -1037,9 +1044,14 @@ static int create_tab(void) {
     char bsh_path[128];
     resolve_bsh_path(bsh_path, sizeof(bsh_path));
     int pid = sys_spawn(bsh_path, args, SPAWN_FLAG_TERMINAL | SPAWN_FLAG_TTY_ID, tty_id);
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        sys_tty_destroy(tty_id);
+        str_copy(g_status_message, "Failed to spawn bsh for the terminal session.", sizeof(g_status_message));
+        return -1;
+    }
 
     tab_init(&g_tabs[g_tab_count], tty_id, pid);
+    g_status_message[0] = 0;
     g_tab_count++;
     return g_tab_count - 1;
 }
@@ -1305,8 +1317,24 @@ static void cleanup_tabs(void) {
     g_active_tab = 0;
 }
 
+static void draw_status_terminal(void) {
+    const char *msg = g_status_message[0] ? g_status_message : "Terminal is not attached to a shell.";
+
+    term_draw_rect(0, 0, g_win_w, TAB_BAR_H, 0xFF1A1A1A);
+    term_draw_string(6, 4, "Terminal", 0xFFFFFFFF);
+    term_draw_rect(0, TAB_BAR_H, g_win_w, g_win_h - TAB_BAR_H, 0xFF1E1E1E);
+    term_draw_string(12, TAB_BAR_H + 18, msg, 0xFFFF8A8A);
+    term_draw_string(12, TAB_BAR_H + 18 + g_line_h + 6,
+                     "The window stays open so this failure is visible.",
+                     0xFFCCCCCC);
+    term_damage(0, 0, g_win_w, g_win_h);
+}
+
 static void draw_terminal(void) {
-    if (g_tab_count <= 0 || g_active_tab < 0 || g_active_tab >= g_tab_count) return;
+    if (g_tab_count <= 0 || g_active_tab < 0 || g_active_tab >= g_tab_count) {
+        draw_status_terminal();
+        return;
+    }
     draw_tabs();
     draw_session(&g_tabs[g_active_tab]);
 }
@@ -1482,14 +1510,11 @@ int main(void) {
     nova_set_icon(g_fd, g_surf_id, "/Library/images/icons/colloid/xterm.png");
 
     int idx = create_tab();
-    if (idx < 0) {
-        unmap_surface_buffer();
-        nova_destroy_surface(g_fd, g_surf_id);
-        close(g_fd);
-        ui_font_shutdown();
-        return 1;
+    if (idx >= 0) {
+        g_active_tab = idx;
+    } else {
+        g_active_tab = -1;
     }
-    g_active_tab = idx;
 
     char out_buf[TTY_READ_CHUNK];
     bool dirty = true;
@@ -1503,7 +1528,7 @@ int main(void) {
         if (pump_ttys(out_buf, sizeof(out_buf))) dirty = true;
         if (process_nova_events(&socket_pfd)) dirty = true;
 
-        if (!g_running || g_tab_count <= 0) break;
+        if (!g_running) break;
 
         if (dirty) {
             draw_terminal();

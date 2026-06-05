@@ -34,7 +34,11 @@ LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libtheme.a obj/libui.a obj/libapp.a obj/libwidget.a
+<<<<<<< Updated upstream
 APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf
+=======
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf explorer.elf libappdemo.elf
+>>>>>>> Stashed changes
 
 all: bootstrap-sdk
 	$(MAKE) export-sdk
@@ -134,7 +138,10 @@ bup: all
 	mkdir -p build; OUT=build/$$BUPNAME; \
 	SRCDIRS="MANIFEST.toml bin config assets"; \
 	if [ -d build/package/scripts ]; then SRCDIRS="$$SRCDIRS scripts"; fi; \
-	tar --lz4 -C build/package -cf $$OUT $$SRCDIRS; \
+	tar -cf build/nova.tar -C build/package $$SRCDIRS; \
+	lz4 -f build/nova.tar build/nova.bup; \
+	cp build/nova.bup $$OUT; \
+	rm -f build/nova.tar; \
 	echo "Created $$OUT"; \
 	rm -rf build/package'
 

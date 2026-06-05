@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 #define NOVA_MAGIC 0x4E4F5641 // 'NOVA'
-#define NOVA_VERSION 1
+#define NOVA_VERSION 1.1
 
 // Surface Creation Flags
 #define SURFACE_FLAG_TRANSPARENT 0x1

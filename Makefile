@@ -104,6 +104,10 @@ install: all
 	cp assets/taskbar.conf assets/wallpaper.conf $(DESTDIR)/Library/conf/
 	mkdir -p $(DESTDIR)/etc/nova
 	cp assets/nova.conf $(DESTDIR)/etc/nova/
+	@if [ -d pack/assets ]; then \
+		mkdir -p $(DESTDIR)/Library; \
+		cp -a pack/assets/* $(DESTDIR)/Library/; \
+	fi
 
 .PHONY: deps bup
 .PHONY: deps
@@ -125,9 +129,10 @@ bup: all
 	for f in $(APPS); do if [ -f "$$f" ]; then cp $$f build/package/bin/; fi; done; \
 	if [ -d assets ]; then cp -a assets/* build/package/config/; fi; \
 	if [ -f assets/nova.conf ]; then cp assets/nova.conf build/package/config/; fi; \
+	if [ -d pack/assets ]; then cp -a pack/assets/* build/package/assets/; fi; \
 	if [ -d pack/scripts ]; then cp -a pack/scripts build/package/; fi; \
 	mkdir -p build; OUT=build/$$BUPNAME; \
-	SRCDIRS="MANIFEST.toml bin config"; \
+	SRCDIRS="MANIFEST.toml bin config assets"; \
 	if [ -d build/package/scripts ]; then SRCDIRS="$$SRCDIRS scripts"; fi; \
 	tar --lz4 -C build/package -cf $$OUT $$SRCDIRS; \
 	echo "Created $$OUT"; \

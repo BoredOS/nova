@@ -7,3 +7,4 @@ license = "GPLv3"
 [install]
 bin = "/bin"
 config = "/etc/nova"
+assets = "/Library"

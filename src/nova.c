@@ -199,6 +199,7 @@ typedef struct {
 
 static client_t clients[MAX_CLIENTS];
 static int client_count = 0;
+static bool quit_loop = false;
 
 // PS/2 Set 1 scancode to NovaKeycode conversion lookup table
 static const NovaKeycode scancode_to_novakey[] = {
@@ -1986,6 +1987,11 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             break;
         }
 
+        case MSG_QUIT: {
+            quit_loop = true;
+            break;
+        }
+
         default:
             break;
     }
@@ -2102,7 +2108,6 @@ int main(int argc, char *argv[]) {
     struct pollfd poll_fds[128];
     surface_t *client_surfaces[128]; // Map client fd index to surface
 
-    bool quit_loop = false;
     bool e0_prefix = false;
     uint8_t mouse_buf[4];
     int mouse_idx = 0;

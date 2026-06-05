@@ -1511,25 +1511,12 @@ int main(void) {
             continue;
         }
 
-        struct pollfd pfds[MAX_TABS + 1];
-        int nfds = 0;
-        pfds[nfds].fd = g_fd;
-        pfds[nfds].events = POLLIN;
-        pfds[nfds].revents = 0;
-        nfds++;
-
-        for (int i = 0; i < g_tab_count; i++) {
-            pfds[nfds].fd = g_tabs[i].tty_id;
-            pfds[nfds].events = POLLIN;
-            pfds[nfds].revents = 0;
-            nfds++;
-        }
-
-        int pr = poll(pfds, nfds, -1);
+        socket_pfd.revents = 0;
+        int pr = poll(&socket_pfd, 1, 16);
         if (pr < 0) {
             break;
         }
-        if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        if (socket_pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
             g_running = false;
         }
     }

@@ -34,7 +34,7 @@ LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libtheme.a obj/libui.a obj/libapp.a obj/libwidget.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf explorer.elf libappdemo.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf
 
 all: bootstrap-sdk
 	$(MAKE) export-sdk

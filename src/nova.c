@@ -459,38 +459,6 @@ void load_nova_config(const char *path) {
             configure_autostart_command(item, val);
         }
 
-        if (streq_ci(section, "keyboard")) {
-            if (strcmp(key, "layout") == 0) {
-                set_keyboard_layout(val);
-            }
-            continue;
-        }
-
-        if (streq_ci(section, "autostart")) {
-            if (strcmp(key, "respawn") == 0) {
-                default_autostart_respawn = parse_bool_config(val, default_autostart_respawn);
-                for (int i = 0; i < autostart_count; i++) {
-                    if (!autostarts[i].respawn_explicit) {
-                        autostarts[i].respawn = default_autostart_respawn;
-                    }
-                }
-                continue;
-            }
-
-            char *dot = strchr(key, '.');
-            if (dot && strcmp(dot + 1, "respawn") == 0) {
-                *dot = '\0';
-                autostart_t *item = find_or_create_autostart(key, default_autostart_respawn);
-                if (item) {
-                    item->respawn = parse_bool_config(val, item->respawn);
-                    item->respawn_explicit = true;
-                }
-                continue;
-            }
-
-            autostart_t *item = find_or_create_autostart(key, default_autostart_respawn);
-            configure_autostart_command(item, val);
-        }
     }
     fclose(f);
 }
@@ -612,59 +580,6 @@ static void finish_pointer_drags(void) {
         c->is_resizing = false;
         c = c->next;
     }
-}
-
-static bool send_key_event(surface_t *surf,
-                           NovaKeycode key,
-                           uint32_t modifiers,
-                           bool pressed,
-                           uint32_t codepoint) {
-    if (!surf || !surf->mapped) return false;
-    if (key == KEY_UNKNOWN && codepoint == 0) return false;
-
-    struct {
-        uint32_t surface_id;
-        uint32_t keycode;
-        uint32_t modifiers;
-        uint8_t pressed;
-        uint8_t text_len;
-        char text[5];
-        uint32_t codepoint;
-    } __attribute__((packed)) pl;
-
-    memset(&pl, 0, sizeof(pl));
-    pl.surface_id = surf->surface_id;
-    pl.keycode = key;
-    pl.modifiers = modifiers;
-    pl.pressed = pressed ? 1 : 0;
-    pl.codepoint = codepoint;
-
-    if (pressed && codepoint >= 32) {
-        int len = text_encode_utf8(codepoint, pl.text);
-        if (len > 0 && len <= 4) {
-            pl.text_len = (uint8_t)len;
-            pl.text[len] = '\0';
-        }
-    }
-
-    return send_frame(surf->client_fd, EVT_KEY, surf->surface_id, &pl, sizeof(pl)) == 0;
-}
-
-static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
-    if (!surf || !surf->mapped) return false;
-
-    struct {
-        uint32_t surface_id;
-        int x, y;
-        uint32_t buttons;
-    } __attribute__((packed)) pl = {
-        surf->surface_id,
-        mx - surf->x,
-        my - surf->y,
-        buttons
-    };
-
-    return send_frame(surf->client_fd, EVT_POINTER, surf->surface_id, &pl, sizeof(pl)) == 0;
 }
 
 static bool send_key_event(surface_t *surf,

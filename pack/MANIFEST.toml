@@ -1,0 +1,9 @@
+name = "nova"
+version = "1"
+description = "Nova compositor and supporting daemons"
+author = "BoredOS Official"
+license = "GPLv3"
+
+[install]
+bin = "/bin"
+config = "/etc/nova"

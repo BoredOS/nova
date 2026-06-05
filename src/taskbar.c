@@ -206,6 +206,12 @@ static void load_taskbar_config(const char *path, taskbar_config_t *cfg) {
     set_default_config(cfg);
 
     FILE *f = fopen(path, "r");
+    if (!f && strcmp(path, "/etc/nova/taskbar.conf") == 0) {
+        f = fopen("/Library/conf/taskbar.conf", "r");
+    }
+    if (!f && strcmp(path, "/Library/conf/taskbar.conf") == 0) {
+        f = fopen("/etc/nova/taskbar.conf", "r");
+    }
     if (!f) return;
 
     char line[256];
@@ -1101,7 +1107,7 @@ int main(int argc, char *argv[]) {
     theme_load("/etc/nova/nova.conf", &theme);
     ui_font_init(theme.font_path, theme.font_size);
 
-    load_taskbar_config("/Library/conf/taskbar.conf", &config);
+    load_taskbar_config("/etc/nova/taskbar.conf", &config);
 
     load_scaled_image(config.logo_path, 20, 20, &logo_img);
     load_scaled_image(DEFAULT_APP_ICON_PATH, 23, 23, &app_icon_img);

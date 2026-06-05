@@ -75,6 +75,12 @@ int theme_load(const char *config_path, ThemeConfig *out_theme) {
     if (!config_path) return 0;
 
     FILE *f = fopen(config_path, "r");
+    if (!f && strcmp(config_path, "/etc/nova/nova.conf") == 0) {
+        f = fopen("/Library/conf/nova.conf", "r");
+    }
+    if (!f && strcmp(config_path, "/Library/conf/nova.conf") == 0) {
+        f = fopen("/etc/nova/nova.conf", "r");
+    }
     if (!f) return 0;
 
     bool has_desktop_bg = false;

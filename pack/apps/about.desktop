@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=About BoredOS
+Comment=Show BoredOS system information
+Exec=/bin/about.elf
+Icon=/Library/images/icons/colloid/application-default-icon.png
+Terminal=false
+Categories=System;

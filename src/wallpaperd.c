@@ -16,6 +16,21 @@
 
 #define DEFAULT_WALLPAPER "/Library/images/Wallpapers/boredos.png"
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static char *trim_spaces(char *str) {
     while (*str && (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n')) {
         str++;
@@ -30,9 +45,7 @@ static char *trim_spaces(char *str) {
 }
 
 static void load_wallpaper_path(const char *path, char *out_path, size_t max_len) {
-    // Set default
-    strncpy(out_path, DEFAULT_WALLPAPER, max_len - 1);
-    out_path[max_len - 1] = '\0';
+    copy_string(out_path, max_len, DEFAULT_WALLPAPER);
 
     FILE *f = fopen(path, "r");
     if (!f && strcmp(path, "/etc/nova/wallpaper.conf") == 0) {
@@ -57,8 +70,7 @@ static void load_wallpaper_path(const char *path, char *out_path, size_t max_len
         char *val = trim_spaces(eq + 1);
 
         if (strcmp(key, "path") == 0) {
-            strncpy(out_path, val, max_len - 1);
-            out_path[max_len - 1] = '\0';
+            copy_string(out_path, max_len, val);
         }
     }
     fclose(f);

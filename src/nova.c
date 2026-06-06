@@ -51,6 +51,21 @@ typedef struct {
 static autostart_t autostarts[8];
 static int autostart_count = 0;
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 // Surface represention
 typedef struct surface {
     uint32_t surface_id;
@@ -315,7 +330,7 @@ static autostart_t *find_or_create_autostart(const char *name, bool default_resp
 
     autostart_t *item = &autostarts[autostart_count++];
     memset(item, 0, sizeof(*item));
-    strncpy(item->name, name, sizeof(item->name) - 1);
+    copy_string(item->name, sizeof(item->name), name);
     item->respawn = default_respawn;
     return item;
 }
@@ -325,36 +340,31 @@ static void resolve_command_path(const char *cmd, char *out, size_t out_size) {
 
     out[0] = '\0';
     if (cmd[0] == '/') {
-        strncpy(out, cmd, out_size - 1);
-        out[out_size - 1] = '\0';
+        copy_string(out, out_size, cmd);
         return;
     }
 
     if (sys_exists(cmd)) {
-        strncpy(out, cmd, out_size - 1);
-        out[out_size - 1] = '\0';
+        copy_string(out, out_size, cmd);
         return;
     }
 
     char candidate[160];
     snprintf(candidate, sizeof(candidate), "/bin/%s", cmd);
     if (sys_exists(candidate)) {
-        strncpy(out, candidate, out_size - 1);
-        out[out_size - 1] = '\0';
+        copy_string(out, out_size, candidate);
         return;
     }
 
     snprintf(candidate, sizeof(candidate), "/bin/%s.elf", cmd);
-    strncpy(out, candidate, out_size - 1);
-    out[out_size - 1] = '\0';
+    copy_string(out, out_size, candidate);
 }
 
 static void configure_autostart_command(autostart_t *item, const char *command) {
     if (!item || !command) return;
 
     char buf[256];
-    strncpy(buf, command, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+    copy_string(buf, sizeof(buf), command);
 
     char *cmd = trim_config(buf);
     if (*cmd == '\0') return;
@@ -368,8 +378,7 @@ static void configure_autostart_command(autostart_t *item, const char *command) 
 
     resolve_command_path(cmd, item->path, sizeof(item->path));
     if (args && *args) {
-        strncpy(item->args, args, sizeof(item->args) - 1);
-        item->args[sizeof(item->args) - 1] = '\0';
+        copy_string(item->args, sizeof(item->args), args);
     } else {
         item->args[0] = '\0';
     }
@@ -399,8 +408,7 @@ void load_nova_config(const char *path) {
             char *end = strchr(start, ']');
             if (!end) continue;
             *end = '\0';
-            strncpy(section, trim_config(start + 1), sizeof(section) - 1);
-            section[sizeof(section) - 1] = '\0';
+            copy_string(section, sizeof(section), trim_config(start + 1));
             continue;
         }
 
@@ -854,11 +862,9 @@ void broadcast_window_event(uint32_t msg_type, surface_t *surf) {
                         } __attribute__((packed)) payload;
 
                         payload.surface_id = surf->surface_id;
-                        strncpy(payload.title, surf->title, 127);
-                        payload.title[127] = '\0';
+                        copy_string(payload.title, sizeof(payload.title), surf->title);
                         payload.state_flags = surf->state_flags;
-                        strncpy(payload.icon_path, surf->icon_path, 255);
-                        payload.icon_path[255] = '\0';
+                        copy_string(payload.icon_path, sizeof(payload.icon_path), surf->icon_path);
                         send_frame(clients[i].fd, msg_type, surf->surface_id, &payload, sizeof(payload));
                     }
                     break;
@@ -1898,8 +1904,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
 
             surface_t *surf = surface_find(p->surface_id);
             if (surf) {
-                strncpy(surf->title, p->title, 127);
-                surf->title[127] = '\0';
+                copy_string(surf->title, sizeof(surf->title), p->title);
                 if (surf->layer == 1 || surf->layer == 2) {
                     mark_dirty_rect(surf->x - BORDER_WIDTH,
                                     surf->y - TITLEBAR_HEIGHT - BORDER_WIDTH,
@@ -1920,8 +1925,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
 
             surface_t *surf = surface_find(p->surface_id);
             if (surf) {
-                strncpy(surf->icon_path, p->icon_path, 255);
-                surf->icon_path[255] = '\0';
+                copy_string(surf->icon_path, sizeof(surf->icon_path), p->icon_path);
                 broadcast_window_event(EVT_WINDOW_TITLE_CHANGED, surf);
             }
             break;
@@ -1972,11 +1976,9 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     } __attribute__((packed)) pl;
 
                     pl.surface_id = c->surface_id;
-                    strncpy(pl.title, c->title, 127);
-                    pl.title[127] = '\0';
+                    copy_string(pl.title, sizeof(pl.title), c->title);
                     pl.state_flags = c->state_flags;
-                    strncpy(pl.icon_path, c->icon_path, 255);
-                    pl.icon_path[255] = '\0';
+                    copy_string(pl.icon_path, sizeof(pl.icon_path), c->icon_path);
 
                     send_frame(fd, EVT_WINDOW_CREATED, c->surface_id, &pl, sizeof(pl));
                 }

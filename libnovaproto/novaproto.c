@@ -7,6 +7,21 @@
 #include <stdio.h>
 #include <errno.h>
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 int nova_connect(const char *socket_path) {
     const char *path = socket_path;
     if (!path) {
@@ -22,7 +37,7 @@ int nova_connect(const char *socket_path) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    copy_string(addr.sun_path, sizeof(addr.sun_path), path);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(fd);
@@ -181,11 +196,9 @@ static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, uin
                 char icon_path[256];
             } __attribute__((packed)) *p = (void *)buffer;
             event_out->surface_id = p->surface_id;
-            strncpy(event_out->data.window.title, p->title, 127);
-            event_out->data.window.title[127] = '\0';
+            copy_string(event_out->data.window.title, sizeof(event_out->data.window.title), p->title);
             event_out->data.window.state_flags = p->state_flags;
-            strncpy(event_out->data.window.icon_path, p->icon_path, 255);
-            event_out->data.window.icon_path[255] = '\0';
+            copy_string(event_out->data.window.icon_path, sizeof(event_out->data.window.icon_path), p->icon_path);
             break;
         }
         case EVT_STATE_CHANGED: {
@@ -339,7 +352,7 @@ int nova_set_icon(int fd, uint32_t surf_id, const char *icon_path) {
     payload.surface_id = surf_id;
     memset(payload.icon_path, 0, 256);
     if (icon_path) {
-        strncpy(payload.icon_path, icon_path, 255);
+        copy_string(payload.icon_path, sizeof(payload.icon_path), icon_path);
     }
 
     return send_frame(fd, MSG_SET_ICON, &payload, sizeof(payload));
@@ -354,7 +367,7 @@ int nova_set_title(int fd, uint32_t surf_id, const char *title) {
     payload.surface_id = surf_id;
     memset(payload.title, 0, 128);
     if (title) {
-        strncpy(payload.title, title, 127);
+        copy_string(payload.title, sizeof(payload.title), title);
     }
 
     return send_frame(fd, MSG_SET_TITLE, &payload, sizeof(payload));

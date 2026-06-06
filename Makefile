@@ -108,6 +108,10 @@ install: all
 		mkdir -p $(DESTDIR)/Library; \
 		cp -a pack/assets/* $(DESTDIR)/Library/; \
 	fi
+	@if [ -d pack/apps ]; then \
+		mkdir -p $(DESTDIR)/usr/share/applications; \
+		cp -a pack/apps/*.desktop $(DESTDIR)/usr/share/applications/; \
+	fi
 
 .PHONY: deps bup
 .PHONY: deps
@@ -124,15 +128,16 @@ bup: all
 	BUPNAME=nova-$$V.bup; \
 	echo "Assembling package $$BUPNAME..."; \
 	rm -rf build/package; \
-	mkdir -p build/package/bin build/package/lib build/package/assets build/package/config; \
+	mkdir -p build/package/bin build/package/lib build/package/assets build/package/config build/package/usr/share/applications; \
 	cp -a pack/MANIFEST.toml build/package/; \
 	for f in $(APPS); do if [ -f "$$f" ]; then cp $$f build/package/bin/; fi; done; \
 	if [ -d assets ]; then cp -a assets/* build/package/config/; fi; \
 	if [ -f assets/nova.conf ]; then cp assets/nova.conf build/package/config/; fi; \
 	if [ -d pack/assets ]; then cp -a pack/assets/* build/package/assets/; fi; \
 	if [ -d pack/scripts ]; then cp -a pack/scripts build/package/; fi; \
+	if [ -d pack/apps ]; then cp -a pack/apps/*.desktop build/package/usr/share/applications/; fi; \
 	mkdir -p build; OUT=build/$$BUPNAME; \
-	SRCDIRS="MANIFEST.toml bin config assets"; \
+	SRCDIRS="MANIFEST.toml bin config assets usr"; \
 	if [ -d build/package/scripts ]; then SRCDIRS="$$SRCDIRS scripts"; fi; \
 	tar -cf build/nova.tar -C build/package $$SRCDIRS; \
 	lz4 -f build/nova.tar build/nova.bup; \

@@ -19,8 +19,8 @@
 
 #define CELL_W      8
 #define CELL_H      16
-#define PTY_READ_SZ 4096
-#define ESC_BUF_SZ  32
+#define PTY_READ_SZ       4096
+#define TERM_ESC_MAX_PARAMS 15
 
 #define TERM_DEFAULT_FG 0xFFCCCCCCu
 #define TERM_DEFAULT_BG 0xFF1E1E1Eu
@@ -36,6 +36,7 @@ typedef enum {
     PARSE_NORMAL = 0,
     PARSE_ESC,
     PARSE_CSI,
+    PARSE_CSI_PRIVATE,
 } ParseState;
 
 typedef struct {
@@ -51,19 +52,39 @@ typedef struct {
     uint32_t cur_bg;
 
     ParseState parse_state;
-    char     esc_buf[ESC_BUF_SZ];
-    int      esc_len;
+    int      esc_params[TERM_ESC_MAX_PARAMS + 1];
+    int      esc_param_idx;
 
     unsigned char utf8_buf[4];
     int      utf8_len;
     int      utf8_needed;
 } TermState;
 
-static const uint32_t ANSI_COLORS[16] = {
-    0xFF1E1E1Eu, 0xFFCC6666u, 0xFF66CC66u, 0xFFCCCC66u,
-    0xFF6666CCu, 0xFFCC66CCu, 0xFF66CCCCu, 0xFFCCCCCCu,
-    0xFF555555u, 0xFFFF6666u, 0xFF66FF66u, 0xFFFFFF66u,
-    0xFF6666FFu, 0xFFFF66FFu, 0xFF66FFFFu, 0xFFFFFFFFu,
+static const uint32_t ANSI_STD_FG[8] = {
+    0xFF000000u, 0xFFFF4444u, 0xFF6A9955u, 0xFFFFCC00u,
+    0xFF569CD6u, 0xFFC586C0u, 0xFF4EC9B0u, 0xFFFFFFFFu,
+};
+
+static const uint32_t ANSI_STD_BG[8] = {
+    0xFF000000u, 0xFFFF4444u, 0xFF6A9955u, 0xFFFFCC00u,
+    0xFF569CD6u, 0xFFC586C0u, 0xFF4EC9B0u, 0xFFFFFFFFu,
+};
+
+static const uint32_t ANSI_BRIGHT_FG[8] = {
+    0xFF555555u, 0xFFFF5555u, 0xFF55FF55u, 0xFFFFFF55u,
+    0xFF5555FFu, 0xFFFF55FFu, 0xFF55FFFFu, 0xFFFFFFFFu,
+};
+
+static const uint32_t ANSI_BRIGHT_BG[8] = {
+    0xFF555555u, 0xFFFF5555u, 0xFF55FF55u, 0xFFFFFF55u,
+    0xFF5555FFu, 0xFFFF55FFu, 0xFF55FFFFu, 0xFFFFFFFFu,
+};
+
+static const uint32_t ANSI_16[16] = {
+    0xFF000000u, 0xFF800000u, 0xFF008000u, 0xFF808000u,
+    0xFF000080u, 0xFF800080u, 0xFF008080u, 0xFFC0C0C0u,
+    0xFF808080u, 0xFFFF0000u, 0xFF00FF00u, 0xFFFFFF00u,
+    0xFF0000FFu, 0xFFFF00FFu, 0xFF00FFFFu, 0xFFFFFFFFu,
 };
 
 static int term_cols(uint32_t width) {
@@ -240,65 +261,77 @@ static void term_set_cursor(TermState *st, int row, int col) {
     if (st->cursor_x >= st->cols) st->cursor_x = st->cols - 1;
 }
 
-static uint32_t term_ansi_color(int code, bool bg) {
-    if (code == 0) {
-        return bg ? TERM_DEFAULT_BG : TERM_DEFAULT_FG;
-    }
-    if (code >= 30 && code <= 37) {
-        return ANSI_COLORS[code - 30];
-    }
-    if (code >= 40 && code <= 47) {
-        return ANSI_COLORS[code - 40];
-    }
-    if (code >= 90 && code <= 97) {
-        return ANSI_COLORS[8 + (code - 90)];
-    }
-    if (code >= 100 && code <= 107) {
-        return ANSI_COLORS[8 + (code - 100)];
-    }
-    return bg ? TERM_DEFAULT_BG : TERM_DEFAULT_FG;
+static void term_csi_begin(TermState *st) {
+    if (!st) return;
+    st->esc_param_idx = 0;
+    memset(st->esc_params, 0, sizeof(st->esc_params));
 }
 
-static void term_apply_sgr(TermState *st, const char *params) {
-    if (!st || !params) return;
+static uint32_t term_color_256(int index) {
+    if (index < 0) return TERM_DEFAULT_FG;
+    if (index < 16) return ANSI_16[index];
 
-    int values[16];
-    int count = 0;
-    const char *p = params;
-
-    while (*p && count < 16) {
-        int val = 0;
-        while (*p >= '0' && *p <= '9') {
-            val = val * 10 + (*p - '0');
-            p++;
-        }
-        values[count++] = val;
-        if (*p == ';') p++;
-        else if (*p == '\0') break;
-        else break;
+    if (index < 232) {
+        static const int levels[6] = { 0, 95, 135, 175, 215, 255 };
+        int rem = index - 16;
+        int r = levels[rem / 36];
+        rem %= 36;
+        int g = levels[rem / 6];
+        int b = levels[rem % 6];
+        return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
     }
 
-    if (count == 0) {
-        st->cur_fg = TERM_DEFAULT_FG;
-        st->cur_bg = TERM_DEFAULT_BG;
-        return;
-    }
+    int gray = 8 + (index - 232) * 10;
+    if (gray > 255) gray = 255;
+    return 0xFF000000u | ((uint32_t)gray << 16) |
+           ((uint32_t)gray << 8) | (uint32_t)gray;
+}
 
-    for (int i = 0; i < count; i++) {
-        int code = values[i];
-        if (code == 0) {
+static void term_apply_sgr(TermState *st) {
+    if (!st) return;
+
+    for (int j = 0; j <= st->esc_param_idx; j++) {
+        int p = st->esc_params[j];
+
+        if (p == 0) {
             st->cur_fg = TERM_DEFAULT_FG;
             st->cur_bg = TERM_DEFAULT_BG;
-        } else if (code == 1) {
-            /* bold: use bright foreground if currently default palette */
-        } else if (code >= 30 && code <= 37) {
-            st->cur_fg = term_ansi_color(code, false);
-        } else if (code >= 40 && code <= 47) {
-            st->cur_bg = term_ansi_color(code, true);
-        } else if (code >= 90 && code <= 97) {
-            st->cur_fg = term_ansi_color(code, false);
-        } else if (code >= 100 && code <= 107) {
-            st->cur_bg = term_ansi_color(code, true);
+        } else if (p == 1) {
+            /* bold/intense - palette already includes bright variants */
+        } else if (p >= 30 && p <= 37) {
+            st->cur_fg = ANSI_STD_FG[p - 30];
+        } else if (p == 38) {
+            if (j + 2 <= st->esc_param_idx && st->esc_params[j + 1] == 5) {
+                st->cur_fg = term_color_256(st->esc_params[j + 2]);
+                j += 2;
+            } else if (j + 4 <= st->esc_param_idx && st->esc_params[j + 1] == 2) {
+                st->cur_fg = 0xFF000000u |
+                             ((uint32_t)st->esc_params[j + 2] << 16) |
+                             ((uint32_t)st->esc_params[j + 3] << 8) |
+                             (uint32_t)st->esc_params[j + 4];
+                j += 4;
+            }
+        } else if (p == 39) {
+            st->cur_fg = TERM_DEFAULT_FG;
+        } else if (p >= 40 && p <= 47) {
+            st->cur_bg = ANSI_STD_BG[p - 40];
+        } else if (p == 48) {
+            if (j + 2 <= st->esc_param_idx && st->esc_params[j + 1] == 5) {
+                st->cur_bg = term_color_256(st->esc_params[j + 2]);
+                j += 2;
+            } else if (j + 4 <= st->esc_param_idx && st->esc_params[j + 1] == 2) {
+                st->cur_bg = 0xFF000000u |
+                             ((uint32_t)st->esc_params[j + 2] << 16) |
+                             ((uint32_t)st->esc_params[j + 3] << 8) |
+                             (uint32_t)st->esc_params[j + 4];
+                j += 4;
+            }
+        } else if (p == 49) {
+            st->cur_bg = TERM_DEFAULT_BG;
+        } else if (p >= 90 && p <= 97) {
+            st->cur_fg = ANSI_BRIGHT_FG[p - 90];
+        } else if (p >= 100 && p <= 107) {
+            st->cur_bg = ANSI_BRIGHT_BG[p - 100];
         }
     }
 }
@@ -306,10 +339,8 @@ static void term_apply_sgr(TermState *st, const char *params) {
 static void term_handle_csi(TermState *st, char final_ch) {
     if (!st) return;
 
-    st->esc_buf[st->esc_len] = '\0';
-
     if (final_ch == 'm') {
-        term_apply_sgr(st, st->esc_buf);
+        term_apply_sgr(st);
         return;
     }
 
@@ -319,24 +350,51 @@ static void term_handle_csi(TermState *st, char final_ch) {
     }
 
     if (final_ch == 'J') {
-        int mode = 0;
-        if (st->esc_len > 0) mode = st->esc_buf[0] - '0';
-        if (mode == 2) term_clear_screen(st);
+        int mode = st->esc_params[0];
+        if (mode == 2) {
+            term_clear_screen(st);
+        }
         return;
     }
 
     if (final_ch == 'H' || final_ch == 'f') {
-        int row = 1;
-        int col = 1;
-        char *semi = strchr(st->esc_buf, ';');
-        if (semi) {
-            *semi = '\0';
-            row = st->esc_buf[0] ? atoi(st->esc_buf) : 1;
-            col = semi[1] ? atoi(semi + 1) : 1;
-        } else if (st->esc_len > 0) {
-            row = atoi(st->esc_buf);
-        }
+        int row = st->esc_params[0];
+        int col = (st->esc_param_idx >= 1) ? st->esc_params[1] : 0;
+        if (row <= 0) row = 1;
+        if (col <= 0) col = 1;
         term_set_cursor(st, row, col);
+        return;
+    }
+
+    if (final_ch == 'A') {
+        int n = st->esc_params[0];
+        if (n <= 0) n = 1;
+        st->cursor_y -= n;
+        if (st->cursor_y < 0) st->cursor_y = 0;
+        return;
+    }
+
+    if (final_ch == 'B') {
+        int n = st->esc_params[0];
+        if (n <= 0) n = 1;
+        st->cursor_y += n;
+        if (st->cursor_y >= st->rows) st->cursor_y = st->rows - 1;
+        return;
+    }
+
+    if (final_ch == 'C') {
+        int n = st->esc_params[0];
+        if (n <= 0) n = 1;
+        st->cursor_x += n;
+        if (st->cursor_x >= st->cols) st->cursor_x = st->cols - 1;
+        return;
+    }
+
+    if (final_ch == 'D') {
+        int n = st->esc_params[0];
+        if (n <= 0) n = 1;
+        st->cursor_x -= n;
+        if (st->cursor_x < 0) st->cursor_x = 0;
     }
 }
 
@@ -395,7 +453,6 @@ static void term_feed_byte(TermState *st, unsigned char byte) {
             if (byte == 0x1b) {
                 term_flush_invalid_utf8(st);
                 st->parse_state = PARSE_ESC;
-                st->esc_len = 0;
             } else if (byte == '\r') {
                 term_flush_invalid_utf8(st);
                 st->cursor_x = 0;
@@ -422,21 +479,42 @@ static void term_feed_byte(TermState *st, unsigned char byte) {
         case PARSE_ESC:
             if (byte == '[') {
                 st->parse_state = PARSE_CSI;
-                st->esc_len = 0;
+                term_csi_begin(st);
             } else {
                 st->parse_state = PARSE_NORMAL;
             }
             break;
 
         case PARSE_CSI:
-            if ((byte >= '0' && byte <= '9') || byte == ';' || byte == '?') {
-                if (st->esc_len + 1 < ESC_BUF_SZ) {
-                    st->esc_buf[st->esc_len++] = (char)byte;
+            if (byte == '?') {
+                st->parse_state = PARSE_CSI_PRIVATE;
+                term_csi_begin(st);
+            } else if (byte >= '0' && byte <= '9') {
+                st->esc_params[st->esc_param_idx] =
+                    st->esc_params[st->esc_param_idx] * 10 + (byte - '0');
+            } else if (byte == ';') {
+                if (st->esc_param_idx < TERM_ESC_MAX_PARAMS) {
+                    st->esc_param_idx++;
                 }
             } else {
                 term_handle_csi(st, (char)byte);
                 st->parse_state = PARSE_NORMAL;
-                st->esc_len = 0;
+            }
+            break;
+
+        case PARSE_CSI_PRIVATE:
+            if (byte >= '0' && byte <= '9') {
+                st->esc_params[st->esc_param_idx] =
+                    st->esc_params[st->esc_param_idx] * 10 + (byte - '0');
+            } else if (byte == ';') {
+                if (st->esc_param_idx < TERM_ESC_MAX_PARAMS) {
+                    st->esc_param_idx++;
+                }
+            } else if (byte == 'h' || byte == 'l') {
+                /* DEC private modes, e.g. ESC[?25h cursor show */
+                st->parse_state = PARSE_NORMAL;
+            } else {
+                st->parse_state = PARSE_NORMAL;
             }
             break;
     }

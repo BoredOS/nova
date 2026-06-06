@@ -145,8 +145,12 @@ static void term_resize_grid(TermState *st, int cols, int rows) {
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
 
-    TermCell *next = calloc((size_t)cols * (size_t)rows, sizeof(TermCell));
+    TermCell *next = malloc((size_t)cols * (size_t)rows * sizeof(TermCell));
     if (!next) return;
+
+    for (int i = 0; i < cols * rows; i++) {
+        term_cell_clear(&next[i], TERM_DEFAULT_FG, TERM_DEFAULT_BG);
+    }
 
     if (st->cells && st->cols > 0 && st->rows > 0) {
         int copy_cols = cols < st->cols ? cols : st->cols;
@@ -155,10 +159,6 @@ static void term_resize_grid(TermState *st, int cols, int rows) {
             memcpy(next + y * cols,
                    st->cells + y * st->cols,
                    (size_t)copy_cols * sizeof(TermCell));
-        }
-    } else {
-        for (int i = 0; i < cols * rows; i++) {
-            term_cell_clear(&next[i], st->cur_fg, st->cur_bg);
         }
     }
 
@@ -564,6 +564,74 @@ static void term_shutdown(TermState *st) {
     }
 }
 
+static void term_fill_rect(uint32_t *pixels, int width, int height,
+                           int x, int y, int rw, int rh, uint32_t color) {
+    if (!pixels || width <= 0 || height <= 0 || rw <= 0 || rh <= 0) return;
+
+    int x1 = x;
+    int y1 = y;
+    int x2 = x + rw;
+    int y2 = y + rh;
+
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > width) x2 = width;
+    if (y2 > height) y2 = height;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    int fill_w = x2 - x1;
+    for (int py = y1; py < y2; py++) {
+        uint32_t *p = pixels + py * width + x1;
+        uint32_t *end = p + fill_w;
+        while (p < end) {
+            *p++ = color;
+        }
+    }
+}
+
+static void term_draw_backgrounds(TermState *st,
+                                  uint32_t *pixels, int width, int height) {
+    term_fill_rect(pixels, width, height, 0, 0, width, height, TERM_DEFAULT_BG);
+
+    for (int y = 0; y < st->rows; y++) {
+        int run_start = -1;
+        uint32_t run_bg = TERM_DEFAULT_BG;
+
+        for (int x = 0; x < st->cols; x++) {
+            uint32_t bg = st->cells[y * st->cols + x].bg;
+            if (bg == TERM_DEFAULT_BG) {
+                if (run_start >= 0) {
+                    term_fill_rect(pixels, width, height,
+                                   run_start * CELL_W, y * CELL_H,
+                                   (x - run_start) * CELL_W, CELL_H,
+                                   run_bg);
+                    run_start = -1;
+                }
+                continue;
+            }
+
+            if (run_start < 0) {
+                run_start = x;
+                run_bg = bg;
+            } else if (bg != run_bg) {
+                term_fill_rect(pixels, width, height,
+                               run_start * CELL_W, y * CELL_H,
+                               (x - run_start) * CELL_W, CELL_H,
+                               run_bg);
+                run_start = x;
+                run_bg = bg;
+            }
+        }
+
+        if (run_start >= 0) {
+            term_fill_rect(pixels, width, height,
+                           run_start * CELL_W, y * CELL_H,
+                           (st->cols - run_start) * CELL_W, CELL_H,
+                           run_bg);
+        }
+    }
+}
+
 static void on_draw(NovaApp *app) {
     TermState *st = app_get_userdata(app);
     if (!st || !st->cells) return;
@@ -573,19 +641,15 @@ static void on_draw(NovaApp *app) {
     int height = (int)app_height(app);
     if (!pixels) return;
 
+    term_draw_backgrounds(st, pixels, width, height);
+
     for (int y = 0; y < st->rows; y++) {
         for (int x = 0; x < st->cols; x++) {
             TermCell *cell = &st->cells[y * st->cols + x];
-            int px = x * CELL_W;
-            int py = y * CELL_H;
-
-            ui_draw_panel(pixels, width, height,
-                          px, py, CELL_W, CELL_H,
-                          cell->bg, cell->bg, 0);
-
             if (!cell->wide_cont && cell->utf8[0] != '\0') {
                 ui_draw_string(pixels, width, height,
-                               px, py + 1, cell->utf8, cell->fg);
+                               x * CELL_W, y * CELL_H + 1,
+                               cell->utf8, cell->fg);
             }
         }
     }

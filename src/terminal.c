@@ -21,6 +21,8 @@
 #define CELL_H      16
 #define PTY_READ_SZ       4096
 #define TERM_ESC_MAX_PARAMS 15
+#define TERM_STARTUP_DRAIN_TRIES 64
+#define TERM_STARTUP_EMPTY_SETTLE 2
 
 #define TERM_DEFAULT_FG 0xFFCCCCCCu
 #define TERM_DEFAULT_BG 0xFF1E1E1Eu
@@ -526,6 +528,41 @@ static void term_feed(TermState *st, const char *data, int len) {
     }
 }
 
+static bool term_drain_pty(TermState *st) {
+    if (!st || st->pty_id < 0) return false;
+
+    char buf[PTY_READ_SZ];
+    bool updated = false;
+
+    for (;;) {
+        int n = sys_tty_read_out(st->pty_id, buf, (int)sizeof(buf));
+        if (n <= 0) break;
+        term_feed(st, buf, n);
+        updated = true;
+    }
+
+    return updated;
+}
+
+static void term_prime_initial_output(TermState *st) {
+    bool saw_output = false;
+    int empty_after_output = 0;
+
+    for (int i = 0; i < TERM_STARTUP_DRAIN_TRIES; i++) {
+        if (term_drain_pty(st)) {
+            saw_output = true;
+            empty_after_output = 0;
+        } else if (saw_output) {
+            empty_after_output++;
+            if (empty_after_output >= TERM_STARTUP_EMPTY_SETTLE) {
+                break;
+            }
+        }
+
+        sys_yield();
+    }
+}
+
 static void term_pty_write(TermState *st, const char *data, int len) {
     if (!st || st->pty_id < 0 || !data || len <= 0) return;
     sys_tty_write_in(st->pty_id, data, len);
@@ -666,17 +703,7 @@ static void on_idle(NovaApp *app) {
         app_request_redraw(app);
     }
 
-    char buf[PTY_READ_SZ];
-    bool updated = false;
-
-    for (;;) {
-        int n = sys_tty_read_out(st->pty_id, buf, (int)sizeof(buf));
-        if (n <= 0) break;
-        term_feed(st, buf, n);
-        updated = true;
-    }
-
-    if (updated) {
+    if (term_drain_pty(st)) {
         app_request_redraw(app);
     }
 }
@@ -761,6 +788,7 @@ int main(void) {
         free(st.cells);
         return 1;
     }
+    term_prime_initial_output(&st);
 
     app_on_draw(app, on_draw);
     app_on_idle(app, on_idle);

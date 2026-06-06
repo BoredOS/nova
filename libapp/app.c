@@ -48,6 +48,7 @@ struct NovaApp {
     AppTextCallback cb_text;
     AppPointerCallback cb_pointer;
     AppCloseCallback cb_close;
+    AppIdleCallback cb_idle;
 
     void *userdata;
 
@@ -375,6 +376,10 @@ int app_run(NovaApp *app) {
             }
         }
 
+        if (app->cb_idle) {
+            app->cb_idle(app);
+        }
+
         if (app->dirty) {
             _do_draw(app);
         }
@@ -424,6 +429,10 @@ void app_on_pointer(NovaApp *app, AppPointerCallback cb) {
 
 void app_on_close(NovaApp *app, AppCloseCallback cb) {
     if (app) app->cb_close = cb;
+}
+
+void app_on_idle(NovaApp *app, AppIdleCallback cb) {
+    if (app) app->cb_idle = cb;
 }
 
 // WM

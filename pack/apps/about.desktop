@@ -3,6 +3,6 @@ Type=Application
 Name=About BoredOS
 Comment=Show BoredOS system information
 Exec=/bin/about.elf
-Icon=/Library/images/icons/colloid/application-default-icon.png
+Icon=/Library/images/icons/bos.png
 Terminal=false
 Categories=System;

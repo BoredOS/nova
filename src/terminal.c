@@ -777,7 +777,7 @@ int main(void) {
         .cur_bg = TERM_DEFAULT_BG,
     };
 
-    NovaApp *app = app_create("Terminal", 720, 480);
+    NovaApp *app = app_create("Terminal", 820, 480);
     if (!app) return 1;
 
     app_set_userdata(app, &st);

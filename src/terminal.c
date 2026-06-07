@@ -23,6 +23,7 @@
 #define TERM_ESC_MAX_PARAMS 15
 #define TERM_STARTUP_DRAIN_TRIES 64
 #define TERM_STARTUP_EMPTY_SETTLE 2
+#define TERM_FONT_SIZE 14
 
 #define TERM_DEFAULT_FG 0xFFCCCCCCu
 #define TERM_DEFAULT_BG 0xFF1E1E1Eu
@@ -50,14 +51,18 @@ typedef struct {
 
     int      cursor_x;
     int      cursor_y;
+    int      saved_cursor_x;
+    int      saved_cursor_y;
     uint32_t cur_fg;
     uint32_t cur_bg;
+    bool     reverse;
+    bool     cursor_visible;
 
     ParseState parse_state;
     int      esc_params[TERM_ESC_MAX_PARAMS + 1];
     int      esc_param_idx;
 
-    unsigned char utf8_buf[4];
+    unsigned char utf8_buf[5];
     int      utf8_len;
     int      utf8_needed;
 } TermState;
@@ -108,12 +113,22 @@ static void term_cell_clear(TermCell *cell, uint32_t fg, uint32_t bg) {
     cell->bg = bg;
 }
 
+static uint32_t term_effective_fg(const TermState *st) {
+    if (!st) return TERM_DEFAULT_FG;
+    return st->reverse ? st->cur_bg : st->cur_fg;
+}
+
+static uint32_t term_effective_bg(const TermState *st) {
+    if (!st) return TERM_DEFAULT_BG;
+    return st->reverse ? st->cur_fg : st->cur_bg;
+}
+
 static int term_utf8_lead_len(unsigned char lead) {
     if ((lead & 0x80u) == 0u) return 1;
     if ((lead & 0xE0u) == 0xC0u) return 2;
     if ((lead & 0xF0u) == 0xE0u) return 3;
     if ((lead & 0xF8u) == 0xF0u) return 4;
-    return 1;
+    return 0;
 }
 
 // utf8
@@ -186,8 +201,10 @@ static void term_scroll_up(TermState *st) {
             (size_t)st->cols * (size_t)(st->rows - 1) * sizeof(TermCell));
 
     TermCell *last = st->cells + st->cols * (st->rows - 1);
+    uint32_t fg = term_effective_fg(st);
+    uint32_t bg = term_effective_bg(st);
     for (int x = 0; x < st->cols; x++) {
-        term_cell_clear(&last[x], st->cur_fg, st->cur_bg);
+        term_cell_clear(&last[x], fg, bg);
     }
 }
 
@@ -205,12 +222,26 @@ static void term_advance_cursor(TermState *st, int cols_used) {
     }
 }
 
+static void term_prepare_cell_for_write(TermState *st, int x, int y,
+                                        uint32_t fg, uint32_t bg) {
+    if (!st || !st->cells) return;
+    if (x < 0 || x >= st->cols || y < 0 || y >= st->rows) return;
+
+    int idx = y * st->cols + x;
+    if (st->cells[idx].wide_cont && x > 0) {
+        term_cell_clear(&st->cells[idx - 1], fg, bg);
+    }
+    if (x + 1 < st->cols && st->cells[idx + 1].wide_cont) {
+        term_cell_clear(&st->cells[idx + 1], fg, bg);
+    }
+}
+
 // Put a UTF-8 character at the current cursor position, handling wide chars and line wrapping
 static void term_put_utf8(TermState *st, const char *utf8, int byte_len, uint32_t cp) {
     if (!st || !st->cells || !utf8 || byte_len <= 0) return;
 
     int width = term_char_width(cp);
-    if (width == 2 && st->cursor_x + 2 > st->cols) {
+    if (width > st->cols) {
         width = 1;
     }
     if (st->cursor_x + width > st->cols) {
@@ -222,17 +253,24 @@ static void term_put_utf8(TermState *st, const char *utf8, int byte_len, uint32_
         }
     }
 
+    uint32_t fg = term_effective_fg(st);
+    uint32_t bg = term_effective_bg(st);
+    term_prepare_cell_for_write(st, st->cursor_x, st->cursor_y, fg, bg);
+    if (width == 2) {
+        term_prepare_cell_for_write(st, st->cursor_x + 1, st->cursor_y, fg, bg);
+    }
+
     TermCell *cell = &st->cells[st->cursor_y * st->cols + st->cursor_x];
     int copy_len = byte_len < 4 ? byte_len : 4;
     memcpy(cell->utf8, utf8, (size_t)copy_len);
     cell->utf8[copy_len] = '\0';
     cell->wide_cont = 0;
-    cell->fg = st->cur_fg;
-    cell->bg = st->cur_bg;
+    cell->fg = fg;
+    cell->bg = bg;
 
     if (width == 2) {
         TermCell *cont = &st->cells[st->cursor_y * st->cols + st->cursor_x + 1];
-        term_cell_clear(cont, st->cur_fg, st->cur_bg);
+        term_cell_clear(cont, fg, bg);
         cont->wide_cont = 1;
     }
 
@@ -241,22 +279,58 @@ static void term_put_utf8(TermState *st, const char *utf8, int byte_len, uint32_
 
 static void term_clear_screen(TermState *st) {
     if (!st || !st->cells) return;
+    uint32_t fg = term_effective_fg(st);
+    uint32_t bg = term_effective_bg(st);
     for (int i = 0; i < st->cols * st->rows; i++) {
-        term_cell_clear(&st->cells[i], st->cur_fg, st->cur_bg);
+        term_cell_clear(&st->cells[i], fg, bg);
     }
-    st->cursor_x = 0;
-    st->cursor_y = 0;
     st->utf8_len = 0;
     st->utf8_needed = 0;
 }
 
+static void term_clear_row_range(TermState *st, int y, int x0, int x1) {
+    if (!st || !st->cells) return;
+    if (y < 0 || y >= st->rows) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 >= st->cols) x1 = st->cols - 1;
+    if (x0 > x1) return;
+
+    uint32_t fg = term_effective_fg(st);
+    uint32_t bg = term_effective_bg(st);
+    for (int x = x0; x <= x1; x++) {
+        term_cell_clear(&st->cells[y * st->cols + x], fg, bg);
+    }
+}
+
 static void term_clear_eol(TermState *st) {
     if (!st || !st->cells) return;
-    if (st->cursor_y < 0 || st->cursor_y >= st->rows) return;
-    for (int x = st->cursor_x; x < st->cols; x++) {
-        term_cell_clear(&st->cells[st->cursor_y * st->cols + x],
-                        st->cur_fg, st->cur_bg);
+    term_clear_row_range(st, st->cursor_y, st->cursor_x, st->cols - 1);
+}
+
+static void term_clear_bol(TermState *st) {
+    if (!st || !st->cells) return;
+    term_clear_row_range(st, st->cursor_y, 0, st->cursor_x);
+}
+
+static void term_clear_line(TermState *st) {
+    if (!st || !st->cells) return;
+    term_clear_row_range(st, st->cursor_y, 0, st->cols - 1);
+}
+
+static void term_clear_to_eos(TermState *st) {
+    if (!st || !st->cells) return;
+    term_clear_eol(st);
+    for (int y = st->cursor_y + 1; y < st->rows; y++) {
+        term_clear_row_range(st, y, 0, st->cols - 1);
     }
+}
+
+static void term_clear_to_bos(TermState *st) {
+    if (!st || !st->cells) return;
+    for (int y = 0; y < st->cursor_y; y++) {
+        term_clear_row_range(st, y, 0, st->cols - 1);
+    }
+    term_clear_bol(st);
 }
 
 static void term_set_cursor(TermState *st, int row, int col) {
@@ -306,8 +380,13 @@ static void term_apply_sgr(TermState *st) {
         if (p == 0) {
             st->cur_fg = TERM_DEFAULT_FG;
             st->cur_bg = TERM_DEFAULT_BG;
+            st->reverse = false;
         } else if (p == 1) {
             // bold/bright -> for simplicity, we just switch to the bright palette for fg colors
+        } else if (p == 7) {
+            st->reverse = true;
+        } else if (p == 27) {
+            st->reverse = false;
         } else if (p >= 30 && p <= 37) {
             st->cur_fg = ANSI_STD_FG[p - 30];
         } else if (p == 38) {
@@ -346,6 +425,35 @@ static void term_apply_sgr(TermState *st) {
     }
 }
 
+static void term_send_input_response(TermState *st, const char *data, int len) {
+    if (!st || st->pty_id < 0 || !data || len <= 0) return;
+    sys_tty_write_in(st->pty_id, data, len);
+}
+
+static void term_report_cursor(TermState *st) {
+    if (!st) return;
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dR",
+                       st->cursor_y + 1, st->cursor_x + 1);
+    term_send_input_response(st, buf, len);
+}
+
+static void term_save_cursor(TermState *st) {
+    if (!st) return;
+    st->saved_cursor_x = st->cursor_x;
+    st->saved_cursor_y = st->cursor_y;
+}
+
+static void term_restore_cursor(TermState *st) {
+    if (!st) return;
+    st->cursor_x = st->saved_cursor_x;
+    st->cursor_y = st->saved_cursor_y;
+    if (st->cursor_x < 0) st->cursor_x = 0;
+    if (st->cursor_y < 0) st->cursor_y = 0;
+    if (st->cursor_x >= st->cols) st->cursor_x = st->cols - 1;
+    if (st->cursor_y >= st->rows) st->cursor_y = st->rows - 1;
+}
+
 static void term_handle_csi(TermState *st, char final_ch) {
     if (!st) return;
 
@@ -355,14 +463,25 @@ static void term_handle_csi(TermState *st, char final_ch) {
     }
 
     if (final_ch == 'K') {
-        term_clear_eol(st);
+        int mode = st->esc_params[0];
+        if (mode == 1) {
+            term_clear_bol(st);
+        } else if (mode == 2) {
+            term_clear_line(st);
+        } else {
+            term_clear_eol(st);
+        }
         return;
     }
 
     if (final_ch == 'J') {
         int mode = st->esc_params[0];
-        if (mode == 2) {
+        if (mode == 1) {
+            term_clear_to_bos(st);
+        } else if (mode == 2 || mode == 3) {
             term_clear_screen(st);
+        } else {
+            term_clear_to_eos(st);
         }
         return;
     }
@@ -373,6 +492,22 @@ static void term_handle_csi(TermState *st, char final_ch) {
         if (row <= 0) row = 1;
         if (col <= 0) col = 1;
         term_set_cursor(st, row, col);
+        return;
+    }
+
+    if (final_ch == 'G') {
+        int col = st->esc_params[0];
+        if (col <= 0) col = 1;
+        st->cursor_x = col - 1;
+        if (st->cursor_x >= st->cols) st->cursor_x = st->cols - 1;
+        return;
+    }
+
+    if (final_ch == 'd') {
+        int row = st->esc_params[0];
+        if (row <= 0) row = 1;
+        st->cursor_y = row - 1;
+        if (st->cursor_y >= st->rows) st->cursor_y = st->rows - 1;
         return;
     }
 
@@ -405,6 +540,23 @@ static void term_handle_csi(TermState *st, char final_ch) {
         if (n <= 0) n = 1;
         st->cursor_x -= n;
         if (st->cursor_x < 0) st->cursor_x = 0;
+        return;
+    }
+
+    if (final_ch == 'n') {
+        if (st->esc_params[0] == 6) {
+            term_report_cursor(st);
+        }
+        return;
+    }
+
+    if (final_ch == 's') {
+        term_save_cursor(st);
+        return;
+    }
+
+    if (final_ch == 'u') {
+        term_restore_cursor(st);
     }
 }
 
@@ -430,6 +582,11 @@ static void term_feed_text_byte(TermState *st, unsigned char byte) {
         if (st->utf8_needed == 1) {
             char ch = (char)byte;
             term_put_utf8(st, &ch, 1, (uint32_t)byte);
+            return;
+        }
+        if (st->utf8_needed <= 0) {
+            static const char repl[] = "\xEF\xBF\xBD";
+            term_put_utf8(st, repl, 3, 0xFFFDu);
             return;
         }
     }
@@ -482,6 +639,14 @@ static void term_feed_byte(TermState *st, unsigned char byte) {
                 term_flush_invalid_utf8(st);
                 int next = ((st->cursor_x / 8) + 1) * 8;
                 st->cursor_x = next;
+                if (st->cursor_x >= st->cols) {
+                    st->cursor_x = 0;
+                    st->cursor_y++;
+                    if (st->cursor_y >= st->rows) {
+                        term_scroll_up(st);
+                        st->cursor_y = st->rows - 1;
+                    }
+                }
             } else if (byte >= 0x20 && byte != 0x7f) {
                 term_feed_text_byte(st, byte);
             }
@@ -491,6 +656,20 @@ static void term_feed_byte(TermState *st, unsigned char byte) {
             if (byte == '[') {
                 st->parse_state = PARSE_CSI;
                 term_csi_begin(st);
+            } else if (byte == '7' || byte == 's') {
+                term_save_cursor(st);
+                st->parse_state = PARSE_NORMAL;
+            } else if (byte == '8' || byte == 'u') {
+                term_restore_cursor(st);
+                st->parse_state = PARSE_NORMAL;
+            } else if (byte == 'c') {
+                st->cur_fg = TERM_DEFAULT_FG;
+                st->cur_bg = TERM_DEFAULT_BG;
+                st->reverse = false;
+                st->cursor_visible = true;
+                term_set_cursor(st, 1, 1);
+                term_clear_screen(st);
+                st->parse_state = PARSE_NORMAL;
             } else {
                 st->parse_state = PARSE_NORMAL;
             }
@@ -522,7 +701,11 @@ static void term_feed_byte(TermState *st, unsigned char byte) {
                     st->esc_param_idx++;
                 }
             } else if (byte == 'h' || byte == 'l') {
-                /* DEC private modes, e.g. ESC[?25h cursor show */
+                for (int i = 0; i <= st->esc_param_idx; i++) {
+                    if (st->esc_params[i] == 25) {
+                        st->cursor_visible = (byte == 'h');
+                    }
+                }
                 st->parse_state = PARSE_NORMAL;
             } else {
                 st->parse_state = PARSE_NORMAL;
@@ -635,6 +818,120 @@ static void term_fill_rect(uint32_t *pixels, int width, int height,
     }
 }
 
+static uint32_t term_cell_codepoint(const TermCell *cell) {
+    if (!cell || cell->utf8[0] == '\0') return 0;
+    int adv = 0;
+    return text_decode_utf8(cell->utf8, &adv);
+}
+
+static bool term_box_segments(uint32_t cp,
+                              bool *top, bool *right,
+                              bool *bottom, bool *left) {
+    if (!top || !right || !bottom || !left) return false;
+
+    *top = false;
+    *right = false;
+    *bottom = false;
+    *left = false;
+
+    switch (cp) {
+        case 0x2500: /* horizontal */
+            *left = true; *right = true; return true;
+        case 0x2502: /* vertical */
+            *top = true; *bottom = true; return true;
+        case 0x250C: /* down and right */
+            *right = true; *bottom = true; return true;
+        case 0x2510: /* down and left */
+            *bottom = true; *left = true; return true;
+        case 0x2514: /* up and right */
+            *top = true; *right = true; return true;
+        case 0x2518: /* up and left */
+            *top = true; *left = true; return true;
+        case 0x251C: /* vertical and right */
+            *top = true; *right = true; *bottom = true; return true;
+        case 0x2524: /* vertical and left */
+            *top = true; *bottom = true; *left = true; return true;
+        case 0x252C: /* down and horizontal */
+            *right = true; *bottom = true; *left = true; return true;
+        case 0x2534: /* up and horizontal */
+            *top = true; *right = true; *left = true; return true;
+        case 0x253C: /* cross */
+            *top = true; *right = true; *bottom = true; *left = true; return true;
+        default:
+            return false;
+    }
+}
+
+static bool term_draw_box_glyph(uint32_t *pixels, int width, int height,
+                                int x, int y, uint32_t cp, uint32_t color) {
+    if (cp == 0x2588) {
+        term_fill_rect(pixels, width, height, x, y, CELL_W, CELL_H, color);
+        return true;
+    }
+
+    bool top, right, bottom, left;
+    if (!term_box_segments(cp, &top, &right, &bottom, &left)) {
+        return false;
+    }
+
+    const int thickness = 2;
+    int cx = x + CELL_W / 2 - thickness / 2;
+    int cy = y + CELL_H / 2 - thickness / 2;
+
+    if (left) {
+        term_fill_rect(pixels, width, height,
+                       x, cy, cx - x + thickness, thickness, color);
+    }
+    if (right) {
+        term_fill_rect(pixels, width, height,
+                       cx, cy, x + CELL_W - cx, thickness, color);
+    }
+    if (top) {
+        term_fill_rect(pixels, width, height,
+                       cx, y, thickness, cy - y + thickness, color);
+    }
+    if (bottom) {
+        term_fill_rect(pixels, width, height,
+                       cx, cy, thickness, y + CELL_H - cy, color);
+    }
+
+    return true;
+}
+
+static void term_invert_rect(uint32_t *pixels, int width, int height,
+                             int x, int y, int rw, int rh) {
+    if (!pixels || width <= 0 || height <= 0 || rw <= 0 || rh <= 0) return;
+
+    int x1 = x;
+    int y1 = y;
+    int x2 = x + rw;
+    int y2 = y + rh;
+
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > width) x2 = width;
+    if (y2 > height) y2 = height;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    for (int py = y1; py < y2; py++) {
+        uint32_t *row = pixels + py * width;
+        for (int px = x1; px < x2; px++) {
+            row[px] = (row[px] ^ 0x00FFFFFFu) | 0xFF000000u;
+        }
+    }
+}
+
+static void term_draw_cursor(TermState *st,
+                             uint32_t *pixels, int width, int height) {
+    if (!st || !st->cursor_visible) return;
+    if (st->cursor_x < 0 || st->cursor_x >= st->cols) return;
+    if (st->cursor_y < 0 || st->cursor_y >= st->rows) return;
+
+    term_invert_rect(pixels, width, height,
+                     st->cursor_x * CELL_W, st->cursor_y * CELL_H,
+                     CELL_W, CELL_H);
+}
+
 static void term_draw_backgrounds(TermState *st,
                                   uint32_t *pixels, int width, int height) {
     term_fill_rect(pixels, width, height, 0, 0, width, height, TERM_DEFAULT_BG);
@@ -693,12 +990,19 @@ static void on_draw(NovaApp *app) {
         for (int x = 0; x < st->cols; x++) {
             TermCell *cell = &st->cells[y * st->cols + x];
             if (!cell->wide_cont && cell->utf8[0] != '\0') {
-                ui_draw_string(pixels, width, height,
-                               x * CELL_W, y * CELL_H + 1,
-                               cell->utf8, cell->fg);
+                uint32_t cp = term_cell_codepoint(cell);
+                if (!term_draw_box_glyph(pixels, width, height,
+                                         x * CELL_W, y * CELL_H,
+                                         cp, cell->fg)) {
+                    ui_draw_string(pixels, width, height,
+                                   x * CELL_W, y * CELL_H + 1,
+                                   cell->utf8, cell->fg);
+                }
             }
         }
     }
+
+    term_draw_cursor(st, pixels, width, height);
 }
 
 static void on_idle(NovaApp *app) {
@@ -778,6 +1082,12 @@ static bool on_close(NovaApp *app) {
     return true;
 }
 
+static void term_init_monospace_font(void) {
+    if (ui_font_init("/Library/Fonts/FiraCode-Regular.ttf", TERM_FONT_SIZE) == 0) return;
+    if (ui_font_init("/Library/Fonts/Hack-Regular.ttf", TERM_FONT_SIZE) == 0) return;
+    ui_font_init(NULL, TERM_FONT_SIZE);
+}
+
 int main(void) {
     // Initialize terminal state with defaults and invalid PTY/shell IDs
     TermState st = {
@@ -785,11 +1095,13 @@ int main(void) {
         .shell_pid = -1,
         .cur_fg = TERM_DEFAULT_FG,
         .cur_bg = TERM_DEFAULT_BG,
+        .cursor_visible = true,
     };
 
     // Create the application window and initialize terminal state
     NovaApp *app = app_create("Terminal", 820, 480);
     if (!app) return 1;
+    term_init_monospace_font();
 
     app_set_userdata(app, &st); // Associate our terminal state with the app for callback access
     term_resize_grid(&st, term_cols(app_width(app)), term_rows(app_height(app)));

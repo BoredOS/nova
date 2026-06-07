@@ -62,6 +62,7 @@ typedef struct {
     int      utf8_needed;
 } TermState;
 
+// ANSI color palette for standard and bright colors, used for SGR color codes
 static const uint32_t ANSI_STD_FG[8] = {
     0xFF000000u, 0xFFFF4444u, 0xFF6A9955u, 0xFFFFCC00u,
     0xFF569CD6u, 0xFFC586C0u, 0xFF4EC9B0u, 0xFFFFFFFFu,
@@ -115,6 +116,7 @@ static int term_utf8_lead_len(unsigned char lead) {
     return 1;
 }
 
+// utf8
 static int term_char_width(uint32_t cp) {
     if (cp < 0x1100u) return 1;
     if ((cp >= 0x1100u && cp <= 0x115Fu) ||
@@ -132,6 +134,7 @@ static int term_char_width(uint32_t cp) {
     return 1;
 }
 
+// move cursor left + handle wide char continuation cells
 static void term_backspace(TermState *st) {
     if (!st || st->cursor_x <= 0) return;
 
@@ -142,6 +145,7 @@ static void term_backspace(TermState *st) {
     }
 }
 
+// Resize the terminal grid, preserving existing content as much as possible
 static void term_resize_grid(TermState *st, int cols, int rows) {
     if (!st) return;
     if (cols < 1) cols = 1;
@@ -173,6 +177,7 @@ static void term_resize_grid(TermState *st, int cols, int rows) {
     if (st->cursor_y >= rows) st->cursor_y = rows - 1;
 }
 
+// Scroll the terminal content up by one line, clearing the new bottom line
 static void term_scroll_up(TermState *st) {
     if (!st || !st->cells || st->rows <= 1) return;
 
@@ -200,6 +205,7 @@ static void term_advance_cursor(TermState *st, int cols_used) {
     }
 }
 
+// Put a UTF-8 character at the current cursor position, handling wide chars and line wrapping
 static void term_put_utf8(TermState *st, const char *utf8, int byte_len, uint32_t cp) {
     if (!st || !st->cells || !utf8 || byte_len <= 0) return;
 
@@ -269,6 +275,7 @@ static void term_csi_begin(TermState *st) {
     memset(st->esc_params, 0, sizeof(st->esc_params));
 }
 
+// Convert a 256-color palette index to an ARGB color value (found on the internet)
 static uint32_t term_color_256(int index) {
     if (index < 0) return TERM_DEFAULT_FG;
     if (index < 16) return ANSI_16[index];
@@ -289,6 +296,7 @@ static uint32_t term_color_256(int index) {
            ((uint32_t)gray << 8) | (uint32_t)gray;
 }
 
+// Apply SGR (Select Graphic Rendition) parameters to update current foreground/background colors
 static void term_apply_sgr(TermState *st) {
     if (!st) return;
 
@@ -299,7 +307,7 @@ static void term_apply_sgr(TermState *st) {
             st->cur_fg = TERM_DEFAULT_FG;
             st->cur_bg = TERM_DEFAULT_BG;
         } else if (p == 1) {
-            /* bold/intense - palette already includes bright variants */
+            // bold/bright -> for simplicity, we just switch to the bright palette for fg colors
         } else if (p >= 30 && p <= 37) {
             st->cur_fg = ANSI_STD_FG[p - 30];
         } else if (p == 38) {
@@ -400,6 +408,7 @@ static void term_handle_csi(TermState *st, char final_ch) {
     }
 }
 
+// Invalid feedback
 static void term_flush_invalid_utf8(TermState *st) {
     if (!st || st->utf8_len <= 0) return;
 
@@ -770,6 +779,7 @@ static bool on_close(NovaApp *app) {
 }
 
 int main(void) {
+    // Initialize terminal state with defaults and invalid PTY/shell IDs
     TermState st = {
         .pty_id = -1,
         .shell_pid = -1,
@@ -777,19 +787,22 @@ int main(void) {
         .cur_bg = TERM_DEFAULT_BG,
     };
 
+    // Create the application window and initialize terminal state
     NovaApp *app = app_create("Terminal", 820, 480);
     if (!app) return 1;
 
-    app_set_userdata(app, &st);
+    app_set_userdata(app, &st); // Associate our terminal state with the app for callback access
     term_resize_grid(&st, term_cols(app_width(app)), term_rows(app_height(app)));
 
+    // Spawn the shell process connected to our PTY and prime the initial output
     if (!term_spawn_shell(&st)) {
         app_destroy(app);
         free(st.cells);
         return 1;
     }
-    term_prime_initial_output(&st);
+    term_prime_initial_output(&st); // Draw the first frame of bsh output 
 
+    // Set up app callbacks for drawing, idle processing, key input, text input, and close events
     app_on_draw(app, on_draw);
     app_on_idle(app, on_idle);
     app_on_key(app, on_key);
@@ -798,6 +811,7 @@ int main(void) {
 
     int rc = app_run(app);
 
+    // Clean up terminal state and app resources on exit
     term_shutdown(&st);
     free(st.cells);
     app_destroy(app);

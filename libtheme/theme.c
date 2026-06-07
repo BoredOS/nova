@@ -4,6 +4,21 @@
 #include <string.h>
 #include <ctype.h>
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static void trim(char *str) {
     char *end;
     char *start = str;
@@ -53,8 +68,7 @@ int theme_load(const char *config_path, ThemeConfig *out_theme) {
     out_theme->panel_border = 0xFF4D4D4D;
     out_theme->border_radius = 8;
 
-    strncpy(out_theme->font_path, "/Library/Fonts/inter.ttf",
-            sizeof(out_theme->font_path) - 1);
+    copy_string(out_theme->font_path, sizeof(out_theme->font_path), "/Library/Fonts/inter.ttf");
     out_theme->font_size    = 14;
     out_theme->text_primary = 0xFFEEEEEE;
     out_theme->text_dim     = 0xFFA6ADC8;
@@ -105,7 +119,7 @@ int theme_load(const char *config_path, ThemeConfig *out_theme) {
         else if (strcmp(key, "desktop_bg")   == 0) { out_theme->desktop_bg = theme_resolve_color(val, out_theme->desktop_bg); has_desktop_bg = true; }
 
         // Typography
-        else if (strcmp(key, "font_path")    == 0) { strncpy(out_theme->font_path, val, sizeof(out_theme->font_path) - 1); out_theme->font_path[sizeof(out_theme->font_path)-1] = '\0'; }
+        else if (strcmp(key, "font_path")    == 0) copy_string(out_theme->font_path, sizeof(out_theme->font_path), val);
         else if (strcmp(key, "font_size")    == 0) out_theme->font_size    = atoi(val);
         else if (strcmp(key, "text_primary") == 0) out_theme->text_primary = theme_resolve_color(val, out_theme->text_primary);
         else if (strcmp(key, "text_dim")     == 0) out_theme->text_dim     = theme_resolve_color(val, out_theme->text_dim);

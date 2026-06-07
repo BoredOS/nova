@@ -33,6 +33,21 @@ typedef struct {
     char      build_date[128];
 } AboutState;
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static bool load_file_to_buffer(const char *path, unsigned char **out_buf, size_t *out_size) {
     if (!path || !out_buf || !out_size) return false;
     *out_buf = NULL;
@@ -165,10 +180,10 @@ static void read_system_info(AboutState *st) {
     char *l3 = l2 ? strchr(l2, '\n') : NULL; if (l3) { *l3++ = '\0'; }
     char *l4 = l3 ? strchr(l3, '\n') : NULL; if (l4) { *l4++ = '\0'; }
 
-    if (l1 && *l1) strncpy(st->os_name,        l1, 127);
-    if (l2 && *l2) strncpy(st->os_version,     l2, 127);
-    if (l3 && *l3) strncpy(st->kernel_version, l3, 127);
-    if (l4 && *l4) strncpy(st->build_date,     l4, 127);
+    if (l1 && *l1) copy_string(st->os_name,        sizeof(st->os_name),        l1);
+    if (l2 && *l2) copy_string(st->os_version,     sizeof(st->os_version),     l2);
+    if (l3 && *l3) copy_string(st->kernel_version, sizeof(st->kernel_version), l3);
+    if (l4 && *l4) copy_string(st->build_date,     sizeof(st->build_date),     l4);
 }
 
 static void on_draw(NovaApp *app) {

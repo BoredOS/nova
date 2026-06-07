@@ -47,6 +47,8 @@
 
 #define DEFAULT_LOGO_PATH "/Library/images/icons/boredos/bOS13.png"
 #define DEFAULT_APP_ICON_PATH "/Library/images/icons/colloid/application-default-icon.png"
+#define DESKTOP_APPS_DIR "/usr/share/applications"
+#define DESKTOP_SUFFIX ".desktop"
 #define DEFAULT_DATE_FORMAT "%Y-%m-%d"
 #define DEFAULT_TIME_FORMAT "%H:%M"
 
@@ -65,8 +67,13 @@ typedef struct {
 } window_tab_t;
 
 typedef struct {
-    char filename[128];
+    char desktop_file[128];
     char display_name[128];
+    char exec[256];
+    char args[256];
+    char icon_path[256];
+    bool terminal;
+    image_t icon_img;
 } app_entry_t;
 
 #define MENU_ACTION_COUNT 3
@@ -147,19 +154,31 @@ static bool should_track_window(uint32_t surface_id, const char *title) {
     return true;
 }
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static void set_default_config(taskbar_config_t *cfg) {
     if (!cfg) return;
     cfg->position_bottom = false;
-    strncpy(cfg->logo_path, DEFAULT_LOGO_PATH, sizeof(cfg->logo_path) - 1);
-    cfg->logo_path[sizeof(cfg->logo_path) - 1] = '\0';
-    strncpy(cfg->date_format, DEFAULT_DATE_FORMAT, sizeof(cfg->date_format) - 1);
-    cfg->date_format[sizeof(cfg->date_format) - 1] = '\0';
+    copy_string(cfg->logo_path, sizeof(cfg->logo_path), DEFAULT_LOGO_PATH);
+    copy_string(cfg->date_format, sizeof(cfg->date_format), DEFAULT_DATE_FORMAT);
     cfg->active_tab_color = 0xFF383838;
     cfg->inactive_tab_color = 0xFF1F1E1E;
     cfg->gradient_top_color = 0xFF393939;
     cfg->gradient_bottom_color = 0xFF727272;
-    strncpy(cfg->clock_format, "24h", sizeof(cfg->clock_format) - 1);
-    cfg->clock_format[sizeof(cfg->clock_format) - 1] = '\0';
+    copy_string(cfg->clock_format, sizeof(cfg->clock_format), "24h");
     cfg->taskbar_border_color = 0xFF393939;
     cfg->launcher_bg_color = 0xFF393939;
     cfg->launcher_border_color = 0xFF3C3C3C;
@@ -234,11 +253,9 @@ static void load_taskbar_config(const char *path, taskbar_config_t *cfg) {
                 cfg->position_bottom = false;
             }
         } else if (strcmp(key, "logo_path") == 0) {
-            strncpy(cfg->logo_path, val, sizeof(cfg->logo_path) - 1);
-            cfg->logo_path[sizeof(cfg->logo_path) - 1] = '\0';
+            copy_string(cfg->logo_path, sizeof(cfg->logo_path), val);
         } else if (strcmp(key, "date_format") == 0) {
-            strncpy(cfg->date_format, val, sizeof(cfg->date_format) - 1);
-            cfg->date_format[sizeof(cfg->date_format) - 1] = '\0';
+            copy_string(cfg->date_format, sizeof(cfg->date_format), val);
         } else if (strcmp(key, "active_tab_color") == 0) {
             uint32_t color = parse_color(val);
             if (color) cfg->active_tab_color = color;
@@ -252,8 +269,7 @@ static void load_taskbar_config(const char *path, taskbar_config_t *cfg) {
             uint32_t color = parse_color(val);
             if (color) cfg->gradient_bottom_color = color;
         } else if (strcmp(key, "clock_format") == 0) {
-            strncpy(cfg->clock_format, val, sizeof(cfg->clock_format) - 1);
-            cfg->clock_format[sizeof(cfg->clock_format) - 1] = '\0';
+            copy_string(cfg->clock_format, sizeof(cfg->clock_format), val);
         } else if (strcmp(key, "taskbar_border_color") == 0) {
             uint32_t color = parse_color(val);
             if (color) cfg->taskbar_border_color = color;
@@ -409,8 +425,7 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
     bool become_active = (state_flags & 1) != 0;
     for (int i = 0; i < window_count; i++) {
         if (windows[i].surface_id == surface_id) {
-            strncpy(windows[i].title, title, sizeof(windows[i].title) - 1);
-            windows[i].title[sizeof(windows[i].title) - 1] = '\0';
+            copy_string(windows[i].title, sizeof(windows[i].title), title);
             windows[i].state_flags = state_flags;
             windows[i].active = become_active;
             if (become_active) {
@@ -435,8 +450,7 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
             last_active_surface_id = surface_id;
         }
         windows[window_count].surface_id = surface_id;
-        strncpy(windows[window_count].title, title, sizeof(windows[window_count].title) - 1);
-        windows[window_count].title[sizeof(windows[window_count].title) - 1] = '\0';
+        copy_string(windows[window_count].title, sizeof(windows[window_count].title), title);
         windows[window_count].state_flags = state_flags;
         windows[window_count].active = become_active;
         memset(&windows[window_count].icon_img, 0, sizeof(image_t));
@@ -561,40 +575,252 @@ static void update_window_focus(uint32_t surface_id, uint32_t state_flags) {
 static void update_window_title(uint32_t surface_id, const char *title) {
     for (int i = 0; i < window_count; i++) {
         if (windows[i].surface_id == surface_id) {
-            strncpy(windows[i].title, title, sizeof(windows[i].title) - 1);
-            windows[i].title[sizeof(windows[i].title) - 1] = '\0';
+            copy_string(windows[i].title, sizeof(windows[i].title), title);
             break;
         }
     }
 }
 
+static bool str_eq_ci(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool str_has_suffix(const char *str, const char *suffix) {
+    if (!str || !suffix) return false;
+    size_t str_len = strlen(str);
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > str_len) return false;
+    return strcmp(str + str_len - suffix_len, suffix) == 0;
+}
+
+static bool desktop_bool_true(const char *value) {
+    if (!value) return false;
+    return str_eq_ci(value, "true") || str_eq_ci(value, "yes") || strcmp(value, "1") == 0;
+}
+
+static void desktop_name_from_file(const char *filename, char *out, size_t out_size) {
+    copy_string(out, out_size, filename);
+    char *suffix = strstr(out, DESKTOP_SUFFIX);
+    if (suffix) *suffix = '\0';
+
+    bool upper_next = true;
+    for (char *p = out; *p; p++) {
+        if (*p == '-' || *p == '_') {
+            *p = ' ';
+            upper_next = true;
+        } else if (upper_next) {
+            *p = (char)toupper((unsigned char)*p);
+            upper_next = false;
+        }
+    }
+}
+
+static void strip_desktop_exec_field_codes(char *text) {
+    if (!text) return;
+
+    char out[256];
+    size_t pos = 0;
+    for (size_t i = 0; text[i] && pos + 1 < sizeof(out); i++) {
+        if (text[i] == '%' && text[i + 1]) {
+            if (text[i + 1] == '%') {
+                out[pos++] = '%';
+            }
+            i++;
+            continue;
+        }
+        out[pos++] = text[i];
+    }
+    out[pos] = '\0';
+    copy_string(text, 256, trim_spaces(out));
+}
+
+static const char *read_exec_token(const char *src, char *out, size_t out_size) {
+    if (!src || !out || out_size == 0) return NULL;
+
+    while (*src == ' ' || *src == '\t') src++;
+
+    size_t pos = 0;
+    bool in_quotes = false;
+    char quote = '\0';
+    while (*src) {
+        char c = *src;
+        if (in_quotes) {
+            if (c == quote) {
+                in_quotes = false;
+                src++;
+                continue;
+            }
+            if (c == '\\' && src[1]) {
+                src++;
+                c = *src;
+            }
+        } else {
+            if (c == '"' || c == '\'') {
+                in_quotes = true;
+                quote = c;
+                src++;
+                continue;
+            }
+            if (c == ' ' || c == '\t') break;
+        }
+
+        if (pos + 1 < out_size) {
+            out[pos++] = c;
+        }
+        src++;
+    }
+
+    out[pos] = '\0';
+    while (*src == ' ' || *src == '\t') src++;
+    return src;
+}
+
+static bool parse_exec_command(const char *raw_exec,
+                               char *out_exec, size_t out_exec_size,
+                               char *out_args, size_t out_args_size) {
+    if (!raw_exec || !out_exec || !out_args) return false;
+
+    const char *args = read_exec_token(raw_exec, out_exec, out_exec_size);
+    if (!args || out_exec[0] == '\0') return false;
+
+    copy_string(out_args, out_args_size, args);
+    strip_desktop_exec_field_codes(out_exec);
+    strip_desktop_exec_field_codes(out_args);
+    return out_exec[0] != '\0';
+}
+
+static bool load_desktop_icon(const char *icon, image_t *out) {
+    if (!icon || !icon[0] || !out) return false;
+
+    if (icon[0] == '/' || strchr(icon, '/')) {
+        return load_scaled_image(icon, 23, 23, out);
+    }
+
+    const char *ext = str_has_suffix(icon, ".png") ? "" : ".png";
+    char path[256];
+    snprintf(path, sizeof(path), "/Library/images/icons/colloid/%s%s", icon, ext);
+    if (load_scaled_image(path, 23, 23, out)) return true;
+
+    snprintf(path, sizeof(path), "/Library/images/icons/%s%s", icon, ext);
+    return load_scaled_image(path, 23, 23, out);
+}
+
+static void clear_applications(void) {
+    for (int i = 0; i < app_count; i++) {
+        free_image(&apps[i].icon_img);
+    }
+    app_count = 0;
+    filtered_count = 0;
+    selected_idx = 0;
+}
+
+static bool add_desktop_application(const char *desktop_file,
+                                    const char *name,
+                                    const char *exec,
+                                    const char *icon,
+                                    bool terminal) {
+    if (app_count >= MAX_APPS || !exec || !exec[0]) return false;
+
+    app_entry_t app;
+    memset(&app, 0, sizeof(app));
+    copy_string(app.desktop_file, sizeof(app.desktop_file), desktop_file);
+    if (name && name[0]) {
+        copy_string(app.display_name, sizeof(app.display_name), name);
+    } else {
+        desktop_name_from_file(desktop_file, app.display_name, sizeof(app.display_name));
+    }
+
+    if (!parse_exec_command(exec, app.exec, sizeof(app.exec), app.args, sizeof(app.args))) {
+        return false;
+    }
+
+    copy_string(app.icon_path, sizeof(app.icon_path), icon);
+    app.terminal = terminal;
+    if (app.icon_path[0]) {
+        load_desktop_icon(app.icon_path, &app.icon_img);
+    }
+
+    apps[app_count++] = app;
+    return true;
+}
+
+static bool load_desktop_file(const char *desktop_file) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", DESKTOP_APPS_DIR, desktop_file);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+
+    char name[128] = "";
+    char exec[256] = "";
+    char icon[256] = "";
+    char type[64] = "";
+    bool no_display = false;
+    bool hidden = false;
+    bool terminal = false;
+    bool in_desktop_entry = false;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char *start = trim_spaces(line);
+        if (*start == '\0' || *start == '#' || *start == ';') continue;
+
+        if (*start == '[') {
+            in_desktop_entry = strcmp(start, "[Desktop Entry]") == 0;
+            continue;
+        }
+        if (!in_desktop_entry) continue;
+
+        char *eq = strchr(start, '=');
+        if (!eq) continue;
+
+        *eq = '\0';
+        char *key = trim_spaces(start);
+        char *val = trim_spaces(eq + 1);
+
+        if (strcmp(key, "Name") == 0) {
+            copy_string(name, sizeof(name), val);
+        } else if (strcmp(key, "Exec") == 0) {
+            copy_string(exec, sizeof(exec), val);
+        } else if (strcmp(key, "Icon") == 0) {
+            copy_string(icon, sizeof(icon), val);
+        } else if (strcmp(key, "Type") == 0) {
+            copy_string(type, sizeof(type), val);
+        } else if (strcmp(key, "NoDisplay") == 0) {
+            no_display = desktop_bool_true(val);
+        } else if (strcmp(key, "Hidden") == 0) {
+            hidden = desktop_bool_true(val);
+        } else if (strcmp(key, "Terminal") == 0) {
+            terminal = desktop_bool_true(val);
+        }
+    }
+
+    fclose(f);
+
+    if (hidden || no_display) return false;
+    if (type[0] && !str_eq_ci(type, "Application")) return false;
+    return add_desktop_application(desktop_file, name, exec, icon, terminal);
+}
+
 static void load_applications(void) {
+    clear_applications();
+
     FAT32_FileInfo entries[128];
-    int count = sys_list("/bin", entries, 128);
+    int count = sys_list(DESKTOP_APPS_DIR, entries, 128);
     if (count < 0) return;
 
-    app_count = 0;
     for (int i = 0; i < count; i++) {
         if (entries[i].is_directory) continue;
-        if (strstr(entries[i].name, ".elf") == NULL) continue;
-        if (app_count < MAX_APPS) {
-            strncpy(apps[app_count].filename, entries[i].name, sizeof(apps[app_count].filename) - 1);
-            apps[app_count].filename[sizeof(apps[app_count].filename) - 1] = '\0';
-
-            char friendly[128];
-            strncpy(friendly, entries[i].name, sizeof(friendly) - 1);
-            friendly[sizeof(friendly) - 1] = '\0';
-
-            char *dot = strstr(friendly, ".elf");
-            if (dot) *dot = '\0';
-            if (friendly[0]) {
-                friendly[0] = (char)toupper((unsigned char)friendly[0]);
-            }
-
-            strncpy(apps[app_count].display_name, friendly, sizeof(apps[app_count].display_name) - 1);
-            apps[app_count].display_name[sizeof(apps[app_count].display_name) - 1] = '\0';
-            app_count++;
-        }
+        if (!str_has_suffix(entries[i].name, DESKTOP_SUFFIX)) continue;
+        load_desktop_file(entries[i].name);
     }
 }
 
@@ -605,14 +831,14 @@ static bool matches_filter(const char *name, const char *filter) {
     char filter_lower[64];
 
     int i = 0;
-    while (name[i]) {
+    while (name[i] && i < (int)sizeof(name_lower) - 1) {
         name_lower[i] = (char)tolower((unsigned char)name[i]);
         i++;
     }
     name_lower[i] = '\0';
 
     i = 0;
-    while (filter[i]) {
+    while (filter[i] && i < (int)sizeof(filter_lower) - 1) {
         filter_lower[i] = (char)tolower((unsigned char)filter[i]);
         i++;
     }
@@ -629,7 +855,7 @@ static void apply_filter(void) {
             filtered_count++;
         }
     }
-    int max_idx = MENU_ACTION_COUNT + filtered_count - 1;
+    int max_idx = filtered_count - 1;
     if (selected_idx > max_idx) {
         selected_idx = max_idx;
     }
@@ -835,11 +1061,12 @@ static void draw_menu(void) {
             ui_draw_panel(menu_pixels, MENU_W, MENU_H, 15, y, MENU_W - 30, ITEM_HEIGHT, item_bg, 0, 0);
         }
 
-        int icon_size = app_icon_img.pixels ? app_icon_img.w : 0;
+        const image_t *icon_img = filtered_apps[i].icon_img.pixels ? &filtered_apps[i].icon_img : &app_icon_img;
+        int icon_size = icon_img->pixels ? icon_img->w : 0;
         int icon_x = 25;
         int icon_y = y + (ITEM_HEIGHT - icon_size) / 2;
-        if (app_icon_img.pixels) {
-            draw_image(menu_pixels, MENU_W, MENU_H, icon_x, icon_y, &app_icon_img);
+        if (icon_img->pixels) {
+            draw_image(menu_pixels, MENU_W, MENU_H, icon_x, icon_y, icon_img);
         }
 
         int text_x = 25 + (icon_size ? icon_size + 6 : 0);
@@ -885,6 +1112,7 @@ static void destroy_menu_surface(void) {
 static void close_taskbar(void) {
     close_menu();
     destroy_menu_surface();
+    clear_applications();
     if (bar_surf_id) {
         nova_destroy_surface(fd, bar_surf_id);
         bar_surf_id = 0;
@@ -918,12 +1146,37 @@ static void perform_menu_action(int action_idx) {
     }
 }
 
+static bool spawn_app_entry(const app_entry_t *app) {
+    if (!app || !app->exec[0]) return false;
+
+    const char *args = app->args[0] ? app->args : NULL;
+    uint64_t flags = SPAWN_FLAG_INHERIT_TTY;
+    if (app->terminal) {
+        flags |= SPAWN_FLAG_TERMINAL;
+    }
+
+    int pid = sys_spawn(app->exec, args, flags, 0);
+    if (pid > 0) return true;
+
+    if (app->exec[0] != '/') {
+        char path[256];
+        snprintf(path, sizeof(path), "/bin/%s", app->exec);
+        pid = sys_spawn(path, args, flags, 0);
+        if (pid > 0) return true;
+
+        if (!str_has_suffix(app->exec, ".elf")) {
+            snprintf(path, sizeof(path), "/bin/%s.elf", app->exec);
+            pid = sys_spawn(path, args, flags, 0);
+            if (pid > 0) return true;
+        }
+    }
+
+    return false;
+}
+
 static bool launch_selected_app(void) {
     if (selected_idx >= 0 && selected_idx < filtered_count) {
-        char full_path[256];
-        snprintf(full_path, sizeof(full_path), "/bin/%s", filtered_apps[selected_idx].filename);
-        int pid = sys_spawn(full_path, NULL, 0x2 /* SPAWN_FLAG_INHERIT_TTY */, 0);
-        return pid > 0;
+        return spawn_app_entry(&filtered_apps[selected_idx]);
     }
     return false;
 }

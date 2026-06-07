@@ -29,6 +29,21 @@ extern int poll(struct pollfd *fds, unsigned long nfds, int timeout);
 
 #define APP_MAX_DIRTY_RECTS 32
 
+static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return;
+    if (!src) src = "";
+
+    volatile const char *vsrc = (volatile const char *)src;
+    size_t i = 0;
+    while (i + 1 < dst_size) {
+        char c = vsrc[i];
+        if (!c) break;
+        dst[i] = c;
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 struct NovaApp {
     int fd;
     uint32_t surf_id;
@@ -207,8 +222,7 @@ static bool _handle_resize(NovaApp *app, uint32_t new_w, uint32_t new_h) {
     _unmap_pixels(app);
     app->width  = new_w;
     app->height = new_h;
-    strncpy(app->shm_path, new_path, sizeof(app->shm_path) - 1);
-    app->shm_path[sizeof(app->shm_path) - 1] = '\0';
+    copy_string(app->shm_path, sizeof(app->shm_path), new_path);
 
     if (!_map_shm(app, new_w, new_h, new_path)) return false;
 

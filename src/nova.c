@@ -133,7 +133,7 @@ void copy_box_to_fb(int bx, int by, int bw, int bh);
 // Mouse coordinates
 static int mx = 0;
 static int my = 0;
-static bool last_left_pressed = false;
+static uint32_t last_pointer_buttons = 0;
 static uint32_t pointer_grab_surface_id = 0;
 static int last_cursor_x = -1;
 static int last_cursor_y = -1;
@@ -754,6 +754,18 @@ static void finish_resize_drag(surface_t *surf) {
     surf->is_resizing = false;
     surf->resize_force_next_request = true;
     queue_resize_request(surf, surf->w, surf->h, true);
+}
+
+static void finish_pointer_drags(void) {
+    surface_t *c = surface_head;
+    while (c) {
+        if (c->is_resizing) {
+            finish_resize_drag(c);
+        }
+        c->is_dragging = false;
+        c->is_resizing = false;
+        c = c->next;
+    }
 }
 
 // focused normal window
@@ -2287,7 +2299,9 @@ int main(int argc, char *argv[]) {
                             if (my >= screen_h) my = screen_h - 1;
 
                             bool fast_drag_handled = false;
-                            bool left_pressed = (flags & 0x01) != 0;
+                            uint32_t pointer_buttons = flags & 0x7;
+                            bool left_pressed = (pointer_buttons & 0x01) != 0;
+                            bool left_was_pressed = (last_pointer_buttons & 0x01) != 0;
                             int click_region = 0;
                             surface_t *hovered = NULL;
 
@@ -2297,13 +2311,13 @@ int main(int argc, char *argv[]) {
                                 pointer_grab_surface_id = 0;
                             }
 
-                            bool active_drag = left_pressed && last_left_pressed && focused && (focused->is_dragging || focused->is_resizing);
+                            bool active_drag = left_pressed && left_was_pressed && focused && (focused->is_dragging || focused->is_resizing);
                             if (!active_drag) {
                                 hovered = surface_at(mx, my, &click_region);
                             }
 
                             if (left_pressed) {
-                                if (!last_left_pressed) {
+                                if (!left_was_pressed) {
                                     // Pointer Press: Focus Shift
                                     if (hovered) {
                                         if (hovered->layer == 1 || hovered->layer == 2) {
@@ -2353,7 +2367,7 @@ int main(int argc, char *argv[]) {
                                         } else if (click_region == 0) {
                                             // Content click: route pointer event
                                             pointer_grab_surface_id = hovered->surface_id;
-                                            send_pointer_event(hovered, flags & 0x7);
+                                            send_pointer_event(hovered, pointer_buttons);
                                         }
                                     } else {
                                         // Clicked background: unfocus active window
@@ -2391,24 +2405,39 @@ int main(int argc, char *argv[]) {
                                             target = hovered;
                                         }
                                         if (target) {
-                                            send_pointer_event(target, flags & 0x7);
+                                            send_pointer_event(target, pointer_buttons);
                                         }
                                     }
                                 }
+                            } else if (pointer_buttons != 0) {
+                                // Non-left content buttons (right/middle) are client input,
+                                // not compositor drag/release controls.
+                                finish_pointer_drags();
+
+                                surface_t *target = grabbed;
+                                if (!target && hovered && click_region == 0) {
+                                    target = hovered;
+                                }
+                                if (target) {
+                                    if (!pointer_grab_surface_id && last_pointer_buttons == 0) {
+                                        pointer_grab_surface_id = target->surface_id;
+                                    }
+                                    send_pointer_event(target, pointer_buttons);
+                                }
                             } else {
                                 // Left button released
-                                if (last_left_pressed) {
+                                if (left_was_pressed) {
                                     // End drag states
-                                    surface_t *c = surface_head;
-                                    while (c) {
-                                        if (c->is_resizing) {
-                                            finish_resize_drag(c);
-                                        }
-                                        c->is_dragging = false;
-                                        c->is_resizing = false;
-                                        c = c->next;
-                                    }
+                                    finish_pointer_drags();
 
+                                    surface_t *target = grabbed;
+                                    if (!target && hovered && click_region == 0) {
+                                        target = hovered;
+                                    }
+                                    if (target) {
+                                        send_pointer_event(target, 0);
+                                    }
+                                } else if (last_pointer_buttons != 0) {
                                     surface_t *target = grabbed;
                                     if (!target && hovered && click_region == 0) {
                                         target = hovered;
@@ -2425,7 +2454,7 @@ int main(int argc, char *argv[]) {
                                     needs_cursor_only = true;
                                 }
                             }
-                            last_left_pressed = left_pressed;
+                            last_pointer_buttons = pointer_buttons;
                             mouse_idx = 0;
                         }
                     }

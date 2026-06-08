@@ -89,7 +89,7 @@ static void term_load_config(TermConfig *cfg) {
     cfg->bg = TERM_DEFAULT_BG;
     cfg->cursor = 0xFFFFFFFFu;
 
-    const char *paths[] = {"/etc/nova/terminal.conf", NULL};
+    const char *paths[] = {"./terminal.conf", "/etc/nova/terminal.conf", NULL};
     for (int i = 0; paths[i]; i++) {
         FILE *f = fopen(paths[i], "r");
         if (!f) continue;
@@ -99,8 +99,8 @@ static void term_load_config(TermConfig *cfg) {
             while (*p == ' ' || *p == '\t') p++;
             if (*p == '#' || *p == '\n' || *p == '\0') continue;
             char key[128], val[384];
-            if (sscanf(p, "%127[^=]=%383[^
 ]", key, val) == 2) {
+            if (sscanf(p, "%127[^=]=%383[^\\n]", key, val) == 2) {
                 /* trim whitespace on val */
                 char *v = val;
                 while (*v == ' ' || *v == '\t') v++;

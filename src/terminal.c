@@ -49,6 +49,11 @@ typedef struct {
     int      rows;
     TermCell *cells;
 
+    /* Backpointer to app and dirty box for efficient redraws */
+    NovaApp *app;
+    int dirty_x0, dirty_y0, dirty_x1, dirty_y1;
+    bool has_dirty;
+
     int      cursor_x;
     int      cursor_y;
     int      saved_cursor_x;
@@ -66,6 +71,60 @@ typedef struct {
     int      utf8_len;
     int      utf8_needed;
 } TermState;
+
+typedef struct {
+    char font_path[256];
+    int font_size;
+    uint32_t fg;
+    uint32_t bg;
+    uint32_t cursor;
+} TermConfig;
+
+static void term_load_config(TermConfig *cfg) {
+    /* defaults */
+    if (!cfg) return;
+    cfg->font_path[0] = '\0';
+    cfg->font_size = TERM_FONT_SIZE;
+    cfg->fg = TERM_DEFAULT_FG;
+    cfg->bg = TERM_DEFAULT_BG;
+    cfg->cursor = 0xFFFFFFFFu;
+
+    const char *paths[] = {"/etc/nova/terminal.conf", NULL};
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '#' || *p == '\n' || *p == '\0') continue;
+            char key[128], val[384];
+            if (sscanf(p, "%127[^=]=%383[^
+]", key, val) == 2) {
+                /* trim whitespace on val */
+                char *v = val;
+                while (*v == ' ' || *v == '\t') v++;
+                char *e = v + strlen(v) - 1;
+                while (e > v && (*e == '\n' || *e == '\r' || *e == ' ' || *e == '\t')) *e-- = '\0';
+                if (strcmp(key, "font") == 0) {
+                    strncpy(cfg->font_path, v, sizeof(cfg->font_path)-1);
+                    cfg->font_path[sizeof(cfg->font_path)-1] = '\0';
+                } else if (strcmp(key, "font_size") == 0) {
+                    cfg->font_size = atoi(v);
+                    if (cfg->font_size <= 0) cfg->font_size = TERM_FONT_SIZE;
+                } else if (strcmp(key, "foreground") == 0 || strcmp(key, "fg") == 0) {
+                    cfg->fg = (uint32_t)strtoul(v, NULL, 0);
+                } else if (strcmp(key, "background") == 0 || strcmp(key, "bg") == 0) {
+                    cfg->bg = (uint32_t)strtoul(v, NULL, 0);
+                } else if (strcmp(key, "cursor") == 0) {
+                    cfg->cursor = (uint32_t)strtoul(v, NULL, 0);
+                }
+            }
+        }
+        fclose(f);
+        break; /* stop at first found config */
+    }
+}
 
 // ANSI color palette for standard and bright colors, used for SGR color codes
 static const uint32_t ANSI_STD_FG[8] = {
@@ -275,6 +334,25 @@ static void term_put_utf8(TermState *st, const char *utf8, int byte_len, uint32_
     }
 
     term_advance_cursor(st, width);
+    /* mark the just-written cell region dirty */
+    if (st) {
+        int last_x = st->cursor_x - width;
+        if (last_x < 0) last_x = 0;
+        int px0 = last_x * CELL_W;
+        int py0 = st->cursor_y * CELL_H;
+        int px1 = (st->cursor_x) * CELL_W + CELL_W - 1;
+        int py1 = py0 + CELL_H - 1;
+        if (!st->has_dirty) {
+            st->dirty_x0 = px0; st->dirty_y0 = py0;
+            st->dirty_x1 = px1; st->dirty_y1 = py1;
+            st->has_dirty = true;
+        } else {
+            if (px0 < st->dirty_x0) st->dirty_x0 = px0;
+            if (py0 < st->dirty_y0) st->dirty_y0 = py0;
+            if (px1 > st->dirty_x1) st->dirty_x1 = px1;
+            if (py1 > st->dirty_y1) st->dirty_y1 = py1;
+        }
+    }
 }
 
 static void term_clear_screen(TermState *st) {
@@ -286,6 +364,14 @@ static void term_clear_screen(TermState *st) {
     }
     st->utf8_len = 0;
     st->utf8_needed = 0;
+    /* mark full area dirty */
+    if (st) {
+        st->has_dirty = true;
+        st->dirty_x0 = 0;
+        st->dirty_y0 = 0;
+        st->dirty_x1 = st->cols * CELL_W - 1;
+        st->dirty_y1 = st->rows * CELL_H - 1;
+    }
 }
 
 static void term_clear_row_range(TermState *st, int y, int x0, int x1) {
@@ -300,23 +386,22 @@ static void term_clear_row_range(TermState *st, int y, int x0, int x1) {
     for (int x = x0; x <= x1; x++) {
         term_cell_clear(&st->cells[y * st->cols + x], fg, bg);
     }
-}
-
-static void term_clear_eol(TermState *st) {
-    if (!st || !st->cells) return;
-    term_clear_row_range(st, st->cursor_y, st->cursor_x, st->cols - 1);
-}
-
-static void term_clear_bol(TermState *st) {
-    if (!st || !st->cells) return;
-    term_clear_row_range(st, st->cursor_y, 0, st->cursor_x);
-}
-
-static void term_clear_line(TermState *st) {
-    if (!st || !st->cells) return;
-    term_clear_row_range(st, st->cursor_y, 0, st->cols - 1);
-}
-
+        if (st) {
+            int px0 = x0 * CELL_W;
+            int py0 = y * CELL_H;
+            int px1 = (x1 + 1) * CELL_W - 1;
+            int py1 = (y + 1) * CELL_H - 1;
+            if (!st->has_dirty) {
+                st->dirty_x0 = px0; st->dirty_y0 = py0;
+                st->dirty_x1 = px1; st->dirty_y1 = py1;
+                st->has_dirty = true;
+            } else {
+                if (px0 < st->dirty_x0) st->dirty_x0 = px0;
+                if (py0 < st->dirty_y0) st->dirty_y0 = py0;
+                if (px1 > st->dirty_x1) st->dirty_x1 = px1;
+                if (py1 > st->dirty_y1) st->dirty_y1 = py1;
+            }
+        }
 static void term_clear_to_eos(TermState *st) {
     if (!st || !st->cells) return;
     term_clear_eol(st);
@@ -786,7 +871,10 @@ static bool term_spawn_shell(TermState *st) {
 static void term_shutdown(TermState *st) {
     if (!st) return;
     if (st->pty_id >= 0) {
+        /* ask kernel to notify/kill attached processes first */
         sys_tty_kill_all(st->pty_id);
+        /* yield a few times to let kernel/gc settle attached fds */
+        for (int i = 0; i < 4; i++) sys_yield();
         sys_pty_destroy(st->pty_id);
         st->pty_id = -1;
         st->shell_pid = -1;
@@ -987,18 +1075,76 @@ static void on_draw(NovaApp *app) {
     term_draw_backgrounds(st, pixels, width, height);
 
     for (int y = 0; y < st->rows; y++) {
+        int run_x = -1;
+        uint32_t run_fg = 0;
+        char run_buf[4096];
+        int run_len = 0;
+
         for (int x = 0; x < st->cols; x++) {
             TermCell *cell = &st->cells[y * st->cols + x];
-            if (!cell->wide_cont && cell->utf8[0] != '\0') {
-                uint32_t cp = term_cell_codepoint(cell);
-                if (!term_draw_box_glyph(pixels, width, height,
-                                         x * CELL_W, y * CELL_H,
-                                         cp, cell->fg)) {
+            if (cell->utf8[0] == '\0' || cell->wide_cont) {
+                /* flush any pending run */
+                if (run_len > 0) {
+                    run_buf[run_len] = '\0';
                     ui_draw_string(pixels, width, height,
-                                   x * CELL_W, y * CELL_H + 1,
-                                   cell->utf8, cell->fg);
+                                   run_x * CELL_W, y * CELL_H + 1,
+                                   run_buf, run_fg);
+                    run_len = 0; run_x = -1;
                 }
+                /* draw box glyphs or skip */
+                if (!cell->wide_cont && cell->utf8[0] != '\0') {
+                    uint32_t cp = term_cell_codepoint(cell);
+                    if (!term_draw_box_glyph(pixels, width, height,
+                                             x * CELL_W, y * CELL_H,
+                                             cp, cell->fg)) {
+                        ui_draw_string(pixels, width, height,
+                                       x * CELL_W, y * CELL_H + 1,
+                                       cell->utf8, cell->fg);
+                    }
+                }
+                continue;
             }
+
+            /* start a new run if necessary */
+            if (run_x < 0) {
+                run_x = x;
+                run_fg = cell->fg;
+                run_len = 0;
+            }
+
+            /* if fg changes, flush and start new run */
+            if (cell->fg != run_fg) {
+                run_buf[run_len] = '\0';
+                ui_draw_string(pixels, width, height,
+                               run_x * CELL_W, y * CELL_H + 1,
+                               run_buf, run_fg);
+                run_x = x;
+                run_fg = cell->fg;
+                run_len = 0;
+            }
+
+            /* append cell utf8 to run buffer (safe append, small strings)
+             * ensure we don't overflow run_buf
+             */
+            int cp_len = (int)strlen(cell->utf8);
+            if (run_len + cp_len < (int)sizeof(run_buf) - 1) {
+                memcpy(run_buf + run_len, cell->utf8, (size_t)cp_len);
+                run_len += cp_len;
+            } else {
+                /* flush if buffer full */
+                run_buf[run_len] = '\0';
+                ui_draw_string(pixels, width, height,
+                               run_x * CELL_W, y * CELL_H + 1,
+                               run_buf, run_fg);
+                run_x = -1; run_len = 0; x--; /* reprocess this cell next iter */
+            }
+        }
+
+        if (run_len > 0 && run_x >= 0) {
+            run_buf[run_len] = '\0';
+            ui_draw_string(pixels, width, height,
+                           run_x * CELL_W, y * CELL_H + 1,
+                           run_buf, run_fg);
         }
     }
 
@@ -1017,7 +1163,20 @@ static void on_idle(NovaApp *app) {
     }
 
     if (term_drain_pty(st)) {
-        app_request_redraw(app);
+        if (st->has_dirty) {
+            int dx = st->dirty_x0;
+            int dy = st->dirty_y0;
+            int dw = st->dirty_x1 - st->dirty_x0 + 1;
+            int dh = st->dirty_y1 - st->dirty_y0 + 1;
+            if (dw > 0 && dh > 0) {
+                app_request_redraw_rect(app, dx, dy, dw, dh);
+            } else {
+                app_request_redraw(app);
+            }
+            st->has_dirty = false;
+        } else {
+            app_request_redraw(app);
+        }
     }
 }
 
@@ -1082,10 +1241,13 @@ static bool on_close(NovaApp *app) {
     return true;
 }
 
-static void term_init_monospace_font(void) {
-    if (ui_font_init("/Library/Fonts/FiraCode-Regular.ttf", TERM_FONT_SIZE) == 0) return;
-    if (ui_font_init("/Library/Fonts/Hack-Regular.ttf", TERM_FONT_SIZE) == 0) return;
-    ui_font_init(NULL, TERM_FONT_SIZE);
+static void term_init_monospace_font(const char *font_path, int font_size) {
+    if (font_path && font_path[0]) {
+        if (ui_font_init(font_path, font_size) == 0) return;
+    }
+    if (ui_font_init("/Library/Fonts/FiraCode-Regular.ttf", font_size) == 0) return;
+    if (ui_font_init("/Library/Fonts/Hack-Regular.ttf", font_size) == 0) return;
+    ui_font_init(NULL, font_size);
 }
 
 int main(void) {
@@ -1101,9 +1263,17 @@ int main(void) {
     // Create the application window and initialize terminal state
     NovaApp *app = app_create("Terminal", 820, 480);
     if (!app) return 1;
-    term_init_monospace_font();
 
+    TermConfig cfg;
+    term_load_config(&cfg);
+    /* initialize font from config (falls back internally) */
+    term_init_monospace_font(cfg.font_path, cfg.font_size);
     app_set_userdata(app, &st); // Associate our terminal state with the app for callback access
+    st.app = app;
+    st.has_dirty = false;
+    /* apply configured colors */
+    st.cur_fg = cfg.fg;
+    st.cur_bg = cfg.bg;
     term_resize_grid(&st, term_cols(app_width(app)), term_rows(app_height(app)));
 
     // Spawn the shell process connected to our PTY and prime the initial output

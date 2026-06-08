@@ -31,6 +31,9 @@ typedef void (*AppPointerCallback)(NovaApp *app, int x, int y, uint32_t buttons)
 // Return true to allow the close, false to cancel it.
 typedef bool (*AppCloseCallback)(NovaApp *app);
 
+// Called once per event-loop iteration (before redraw). Use for polling I/O.
+typedef void (*AppIdleCallback)(NovaApp *app);
+
 // Create a new application window with the given title and initial dimensions.
 // Loads the system theme automatically. Returns NULL on failure.
 NovaApp *app_create(const char *title, uint32_t width, uint32_t height);
@@ -55,6 +58,7 @@ void app_on_key(NovaApp *app, AppKeyCallback cb);
 void app_on_text(NovaApp *app, AppTextCallback cb);
 void app_on_pointer(NovaApp *app, AppPointerCallback cb);
 void app_on_close(NovaApp *app, AppCloseCallback cb);
+void app_on_idle(NovaApp *app, AppIdleCallback cb);
 
 // Change the window title at runtime.
 void app_set_title(NovaApp *app, const char *title);

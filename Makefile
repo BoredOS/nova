@@ -27,14 +27,14 @@ DESTDIR ?= $(abspath build/dist)
 
 CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -m64 -march=x86-64 -mno-red-zone \
-          -isystem $(SDK_PATH)/include -Ilibnovaproto -Ilibtheme -Ilibui -Ilibapp -Ilibwidget -I.
+          -isystem $(SDK_PATH)/include -Ilibnovaproto -Ilibtheme -Ilibui -Ilibapp -Ilibwidget -Isrc -I.
 
 LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
           --no-dynamic-linker -z text -z max-page-size=0x1000 -e _start \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libtheme.a obj/libui.a obj/libapp.a obj/libwidget.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf terminal.elf
 
 all: bootstrap-sdk
 	$(MAKE) export-sdk

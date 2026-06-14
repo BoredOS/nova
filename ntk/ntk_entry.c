@@ -99,7 +99,7 @@ static void entry_paint(NtkWidget *w, NtkPainter *p) {
     NtkTextEntryInstance *inst = ntk_widget_get_instance_data(w);
     NtkRect geom = ntk_widget_get_geometry(w);
     NtkStyle *style = ntk_widget_get_style(w);
-    NtkColor bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WIDGET_BG);
+    NtkColor bg = 0xFFFFFFFF;
     NtkColor light = ntk_style_get_color(style, NTK_STYLE_ROLE_BORDER_LIGHT);
     NtkColor dark = ntk_style_get_color(style, NTK_STYLE_ROLE_BORDER_DARK);
     NtkColor text_col = ntk_style_get_color(style, NTK_STYLE_ROLE_TEXT_PRIMARY);

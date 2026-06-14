@@ -37,7 +37,7 @@ static void style_set_defaults(NtkStyle *s) {
     s->colors[NTK_STYLE_ROLE_TITLEBAR_TEXT_ACTIVE]   = 0xFFFFFFFF;
     s->colors[NTK_STYLE_ROLE_TITLEBAR_TEXT_INACTIVE] = 0xFFC0C0C0;
     s->colors[NTK_STYLE_ROLE_BORDER_LIGHT]           = 0xFFFFFFFF;
-    s->colors[NTK_STYLE_ROLE_BORDER_DARK]            = 0xFF000000;
+    s->colors[NTK_STYLE_ROLE_BORDER_DARK]            = 0xFF676767;
     s->colors[NTK_STYLE_ROLE_MENUBAR_BG]             = 0xFFB0B0B0;
     s->colors[NTK_STYLE_ROLE_MENU_BG]                = 0xFFB0B0B0;
     s->colors[NTK_STYLE_ROLE_MENU_HIGHLIGHT]         = 0xFF000080;

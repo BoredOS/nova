@@ -683,8 +683,8 @@ void ntk_painter_draw_bevel_raised(NtkPainter *p, NtkRect rect, NtkColor light, 
 
     NtkColor outer_light = 0xFFFFFFFF; 
     NtkColor inner_light = 0xFFFFFFFF; 
-    NtkColor inner_dark  = 0xFF000000; 
-    NtkColor outer_dark  = 0xFF000000; 
+    NtkColor inner_dark  = 0xFF676767; 
+    NtkColor outer_dark  = 0xFF676767; 
     NtkColor saved = p->color;
     p->color = outer_light;
     for (int x = x1; x < x2; x++) painter_set_pixel(p, x, y1, p->color);
@@ -709,8 +709,8 @@ void ntk_painter_draw_bevel_sunken(NtkPainter *p, NtkRect rect, NtkColor light, 
     int x2 = rect.x + rect.width - 1;
     int y2 = rect.y + rect.height - 1;
 
-    NtkColor outer_shadow = 0xFF000000; 
-    NtkColor inner_shadow = 0xFF000000; 
+    NtkColor outer_shadow = 0xFF676767; 
+    NtkColor inner_shadow = 0xFF676767; 
     NtkColor inner_highlight = 0xFFFFFFFF; 
     NtkColor outer_highlight = 0xFFFFFFFF; 
     NtkColor saved = p->color;

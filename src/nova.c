@@ -140,10 +140,10 @@ static void draw_title_button(uint32_t *buffer, int w, int h, int bx, int by, in
     fill_rect_safe(buffer, w, h, bx, by, bw, bh, 0xFFB0B0B0);
 
     if (pressed) {
-        draw_line_v_safe(buffer, w, h, bx, by, by + bh - 1, 0xFF000000);
-        draw_line_h_safe(buffer, w, h, bx, by, bx + bw - 1, 0xFF000000);
-        draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFF000000);
-        draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFF000000);
+        draw_line_v_safe(buffer, w, h, bx, by, by + bh - 1, 0xFF676767);
+        draw_line_h_safe(buffer, w, h, bx, by, bx + bw - 1, 0xFF676767);
+        draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFF676767);
+        draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFF676767);
         
         draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFFFFFFFF);
         draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFFFFFFFF);
@@ -155,10 +155,10 @@ static void draw_title_button(uint32_t *buffer, int w, int h, int bx, int by, in
         draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFFFFFFFF);
         draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFFFFFFFF);
         
-        draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFF000000);
-        draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFF000000);
-        draw_line_v_safe(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFF000000);
-        draw_line_h_safe(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFF000000);
+        draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFF676767);
+        draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFF676767);
+        draw_line_v_safe(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFF676767);
+        draw_line_h_safe(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFF676767);
     }
 
     int ox = pressed ? 1 : 0;
@@ -1833,13 +1833,13 @@ void compositor_composite(void) {
                     
                     draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_y + outer_h - 1, 0xFFFFFFFF);
                     draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_x + outer_w - 1, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF000000);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF000000);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF676767);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF676767);
 
                     draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_y + outer_h - 2, 0xFFFFFFFF);
                     draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_x + outer_w - 2, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF000000);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF000000);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF676767);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF676767);
                     uint32_t t_start = curr->focused ? active_titlebar_top : inactive_titlebar_top;
                     uint32_t t_end = curr->focused ? active_titlebar_bottom : inactive_titlebar_bottom;
                     int t_x = curr->x;
@@ -1886,10 +1886,10 @@ void compositor_composite(void) {
                     int cx_w = curr->w + 4;
                     int cx_h = curr->h + 4;
                     
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF000000);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF000000);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_left + cx_w - 2, 0xFF000000);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_top + cx_h - 2, 0xFF000000);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF676767);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF676767);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_left + cx_w - 2, 0xFF676767);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_top + cx_h - 2, 0xFF676767);
 
                     draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top + cx_h - 1, cx_left + cx_w - 1, 0xFFFFFFFF);
                     draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 1, cx_top, cx_top + cx_h - 1, 0xFFFFFFFF);

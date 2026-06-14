@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Run...
+Comment=Run a program
+Exec=/bin/run.elf
+Icon=/Library/images/icons/serenityicons/16x16/app-run.png
+Terminal=false
+Categories=System;

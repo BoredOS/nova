@@ -4,172 +4,28 @@
 
 // BOREDOS_APP_DESC: Shows BoredOS information.
 
+#include "ntk.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include "libapp/app.h"
-#include "libwidget/widget.h"
-#include "stb_image.h"
 
-#define BRANDING_PATH     "/Library/images/branding/bOS_full_gradient_cropped.png"
-#define BRANDING_TARGET_W 350
-#define BRANDING_FALLBACK_H 88
-#define OFFSET_X          35
-#define OFFSET_Y          15
-#define LINE_H            17
+#define BRANDING_PATH "/Library/images/branding/bOS_full_gradient_cropped.png"
 
 typedef struct {
-    WCtx     *ctx;
-    uint32_t *branding_pixels;
-    int       branding_w;
-    int       branding_h;
-
-    // System info
-    char      os_name[128];
-    char      os_version[128];
-    char      kernel_version[128];
-    char      build_date[128];
+    char os_name[128];
+    char os_version[128];
+    char kernel_version[128];
 } AboutState;
-
-static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
-    if (!dst || dst_size == 0) return;
-    if (!src) src = "";
-
-    volatile const char *vsrc = (volatile const char *)src;
-    size_t i = 0;
-    while (i + 1 < dst_size) {
-        char c = vsrc[i];
-        if (!c) break;
-        dst[i] = c;
-        i++;
-    }
-    dst[i] = '\0';
-}
-
-static bool load_file_to_buffer(const char *path, unsigned char **out_buf, size_t *out_size) {
-    if (!path || !out_buf || !out_size) return false;
-    *out_buf = NULL;
-    *out_size = 0;
-
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return false;
-    }
-
-    long size = ftell(f);
-    if (size <= 0 || size > 16 * 1024 * 1024) {
-        fclose(f);
-        return false;
-    }
-
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return false;
-    }
-
-    unsigned char *buf = malloc((size_t)size);
-    if (!buf) {
-        fclose(f);
-        return false;
-    }
-
-    size_t read_size = fread(buf, 1, (size_t)size, f);
-    fclose(f);
-    if (read_size != (size_t)size) {
-        free(buf);
-        return false;
-    }
-
-    *out_buf = buf;
-    *out_size = (size_t)size;
-    return true;
-}
-
-static void scale_rgba_to_argb(const unsigned char *rgba,
-                                int src_w, int src_h,
-                                uint32_t *dst, int dst_w, int dst_h) {
-    if (src_w == dst_w && src_h == dst_h) {
-        for (int i = 0; i < dst_w * dst_h; i++) {
-            int idx = i * 4;
-            dst[i] = ((uint32_t)rgba[idx + 3] << 24) |
-                     ((uint32_t)rgba[idx    ] << 16) |
-                     ((uint32_t)rgba[idx + 1] <<  8) |
-                      (uint32_t)rgba[idx + 2];
-        }
-        return;
-    }
-
-    uint32_t step_x = ((uint32_t)src_w << 16) / (uint32_t)dst_w;
-    uint32_t step_y = ((uint32_t)src_h << 16) / (uint32_t)dst_h;
-    uint32_t curr_y = 0;
-
-    for (int y = 0; y < dst_h; y++) {
-        uint32_t sy = curr_y >> 16;
-        if (sy >= (uint32_t)src_h) sy = (uint32_t)(src_h - 1);
-        uint32_t curr_x = 0;
-        for (int x = 0; x < dst_w; x++) {
-            uint32_t sx = curr_x >> 16;
-            if (sx >= (uint32_t)src_w) sx = (uint32_t)(src_w - 1);
-            int idx = ((int)(sy * (uint32_t)src_w + sx)) * 4;
-            dst[y * dst_w + x] = ((uint32_t)rgba[idx + 3] << 24) |
-                                  ((uint32_t)rgba[idx    ] << 16) |
-                                  ((uint32_t)rgba[idx + 1] <<  8) |
-                                   (uint32_t)rgba[idx + 2];
-            curr_x += step_x;
-        }
-        curr_y += step_y;
-    }
-}
-
-static void load_branding_image(AboutState *st) {
-    st->branding_w = BRANDING_TARGET_W;
-    st->branding_h = BRANDING_FALLBACK_H;
-
-    unsigned char *buf = NULL;
-    size_t size = 0;
-    if (!load_file_to_buffer(BRANDING_PATH, &buf, &size)) return;
-
-    int img_w = 0, img_h = 0, channels = 0;
-    unsigned char *rgba = stbi_load_from_memory(buf, (int)size,
-                                                &img_w, &img_h, &channels, 4);
-    free(buf);
-    if (!rgba || img_w <= 0 || img_h <= 0) {
-        if (rgba) stbi_image_free(rgba);
-        return;
-    }
-
-    int target_h = (int)(((int64_t)img_h * BRANDING_TARGET_W) / img_w);
-    if (target_h <= 0) {
-        stbi_image_free(rgba);
-        return;
-    }
-    st->branding_h = target_h;
-
-    st->branding_pixels = malloc((size_t)(st->branding_w * st->branding_h) * sizeof(uint32_t));
-    if (st->branding_pixels) {
-        scale_rgba_to_argb(rgba, img_w, img_h,
-                           st->branding_pixels, st->branding_w, st->branding_h);
-    } else {
-        st->branding_h = BRANDING_FALLBACK_H;
-    }
-    stbi_image_free(rgba);
-}
 
 static void read_system_info(AboutState *st) {
     strcpy(st->os_name,        "BoredOS");
     strcpy(st->os_version,     "Unknown Version");
     strcpy(st->kernel_version, "Unknown Kernel");
-    strcpy(st->build_date,     "Unknown Build");
 
-    char v_buf[512];
     FILE *f = fopen("/proc/version", "r");
     if (!f) return;
 
+    char v_buf[512];
     size_t bytes = fread(v_buf, 1, sizeof(v_buf) - 1, f);
     fclose(f);
     if (bytes == 0) return;
@@ -178,73 +34,68 @@ static void read_system_info(AboutState *st) {
     char *l1 = v_buf;
     char *l2 = strchr(l1, '\n'); if (l2) { *l2++ = '\0'; } else l2 = NULL;
     char *l3 = l2 ? strchr(l2, '\n') : NULL; if (l3) { *l3++ = '\0'; }
-    char *l4 = l3 ? strchr(l3, '\n') : NULL; if (l4) { *l4++ = '\0'; }
 
-    if (l1 && *l1) copy_string(st->os_name,        sizeof(st->os_name),        l1);
-    if (l2 && *l2) copy_string(st->os_version,     sizeof(st->os_version),     l2);
-    if (l3 && *l3) copy_string(st->kernel_version, sizeof(st->kernel_version), l3);
-    if (l4 && *l4) copy_string(st->build_date,     sizeof(st->build_date),     l4);
-}
-
-static void on_draw(NovaApp *app) {
-    AboutState *st = app_get_userdata(app);
-    int w = (int)app_width(app);
-
-    wctx_begin(st->ctx);
-
-    // Branding image
-    if (st->branding_pixels) {
-        int img_x = (w - st->branding_w) / 2;
-        widget_image(st->ctx, img_x, OFFSET_Y,
-                     st->branding_pixels, st->branding_w, st->branding_h, 1.0f);
-    } else {
-        int img_x = (w - st->branding_w) / 2;
-        app_draw_rect(app, img_x, OFFSET_Y, st->branding_w, st->branding_h,
-                      0xFF24273A, 0xFF45475A, 8);
-        app_draw_string_centered(app, OFFSET_Y + st->branding_h / 2 - 8,
-                                 "BoredOS", 0xFFFFFFFF);
-    }
-
-    // System info block
-    int text_y = OFFSET_Y + st->branding_h + 14;
-
-    widget_label(st->ctx, OFFSET_X, text_y,              st->os_name,        0xFFFFFFFF);
-    widget_label(st->ctx, OFFSET_X, text_y + LINE_H,     st->os_version,     0xFFFFFFFF);
-    widget_label(st->ctx, OFFSET_X, text_y + LINE_H * 2, st->kernel_version, 0xFFFFFFFF);
-
-    widget_separator(st->ctx, OFFSET_X, text_y + LINE_H * 3 + 4, w - OFFSET_X * 2, true);
-
-    widget_label(st->ctx, OFFSET_X, text_y + LINE_H * 3 + 10,
-                 "(C) 2023-2026 Christiaan (chris@boreddev.nl)", 0xFFA6ADC8);
-    widget_label(st->ctx, OFFSET_X, text_y + LINE_H * 4 + 10,
-                 "All rights reserved.", 0xFFA6ADC8);
-
-    wctx_end(st->ctx);
+    if (l1 && *l1) strncpy(st->os_name,        l1, sizeof(st->os_name) - 1);
+    if (l2 && *l2) strncpy(st->os_version,     l2, sizeof(st->os_version) - 1);
+    if (l3 && *l3) strncpy(st->kernel_version, l3, sizeof(st->kernel_version) - 1);
 }
 
 int main(void) {
-    AboutState st = {0};
+    NtkApp *app = ntk_app_new();
+    if (!app) return 1;
 
-    // Load resources before creating the window so we know the exact height
-    load_branding_image(&st);
-    read_system_info(&st);
+    AboutState state;
+    read_system_info(&state);
 
-    // Height: top padding + branding + gap + 5 text rows + bottom padding
-    int win_h = OFFSET_Y + st.branding_h + 14 + LINE_H * 5 + 22;
+    NtkWidget *win = ntk_window_new("About BoredOS", 420, 260);
+    if (!win) {
+        ntk_app_destroy(app);
+        return 1;
+    }
+    ntk_window_set_resizable(win, false);
 
-    NovaApp *app = app_create("About BoredOS", 420, (uint32_t)win_h);
-    if (!app) { free(st.branding_pixels); return 1; }
+    NtkWidget *vbox = ntk_box_new(NTK_VERTICAL, win);
+    ntk_box_set_spacing(vbox, 10);
+    ntk_window_set_content(win, vbox);
 
-    st.ctx = wctx_create(app);
-    if (!st.ctx) { free(st.branding_pixels); app_destroy(app); return 1; }
+    NtkWidget *img = ntk_image_new_from_file(BRANDING_PATH, vbox);
+    if (img) {
+        ntk_image_set_scale_mode(img, NTK_SCALE_FIT);
+        ntk_widget_set_min_size(img, NTK_SIZE(360, 90));
+        ntk_box_pack_start(vbox, img, false, false, 10);
+    } else {
+        NtkWidget *fallback_lbl = ntk_label_new("BoredOS", vbox);
+        ntk_label_set_alignment(fallback_lbl, NTK_ALIGN_CENTER);
+        ntk_box_pack_start(vbox, fallback_lbl, false, false, 20);
+    }
 
-    app_set_userdata(app, &st);
-    app_on_draw(app, on_draw);
+    NtkWidget *lbl_name = ntk_label_new(state.os_name, vbox);
+    ntk_label_set_alignment(lbl_name, NTK_ALIGN_CENTER);
+    ntk_box_pack_start(vbox, lbl_name, false, false, 2);
 
-    int rc = app_run(app);
+    NtkWidget *lbl_ver = ntk_label_new(state.os_version, vbox);
+    ntk_label_set_alignment(lbl_ver, NTK_ALIGN_CENTER);
+    ntk_box_pack_start(vbox, lbl_ver, false, false, 2);
 
-    wctx_destroy(st.ctx);
-    if (st.branding_pixels) free(st.branding_pixels);
-    app_destroy(app);
+    NtkWidget *lbl_kern = ntk_label_new(state.kernel_version, vbox);
+    ntk_label_set_alignment(lbl_kern, NTK_ALIGN_CENTER);
+    ntk_box_pack_start(vbox, lbl_kern, false, false, 2);
+
+    NtkWidget *sep = ntk_label_new("____________________________________________________", vbox);
+    ntk_label_set_alignment(sep, NTK_ALIGN_CENTER);
+    ntk_box_pack_start(vbox, sep, false, false, 5);
+
+    NtkWidget *lbl_copyright = ntk_label_new("(C) 2023-2026 Christiaan (chris@boreddev.nl)", vbox);
+    ntk_label_set_alignment(lbl_copyright, NTK_ALIGN_CENTER);
+    ntk_box_pack_start(vbox, lbl_copyright, false, false, 2);
+
+    NtkWidget *lbl_rights = ntk_label_new("All rights reserved.", vbox);
+    ntk_label_set_alignment(lbl_rights, NTK_ALIGN_CENTER);
+    ntk_box_pack_start(vbox, lbl_rights, false, false, 2);
+
+    ntk_widget_show(win);
+    int rc = ntk_app_run(app);
+
+    ntk_app_destroy(app);
     return rc;
 }

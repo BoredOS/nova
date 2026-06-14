@@ -3,6 +3,6 @@ Type=Application
 Name=Hello World !
 Comment=Nova widget demo application
 Exec=/bin/helloworld.elf
-Icon=/Library/images/icons/colloid/application-default-icon.png
+Icon=/Library/images/icons/serenityicons/32x32/app-terminal.png
 Terminal=false
 Categories=Development;

@@ -1,5 +1,7 @@
-// BOREDOS_APP_DESC: Taskbar with start menu, window list, and clock.
-// BOREDOS_APP_ICONS: /Library/images/icons/colloid/application-default-icon.png
+// Copyright (c) 2023-2026 Christiaan (chris@boreddev.nl)
+// This software is released under the GNU General Public License v3.0. See LICENSE file for details.
+// This header needs to maintain in any file it is present in, as per the GPL license terms.// BOREDOS_APP_DESC: Taskbar with start menu, window list, and clock.
+// BOREDOS_APP_ICONS: /Library/images/icons/serenityicons/32x32/app-terminal.png
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,10 +14,105 @@
 #include <ctype.h>
 #include <syscall.h>
 #include "utf-8.h"
-#include "libtheme/theme.h"
-#include "libui/ui.h"
+#include "ntk.h"
 #include "libnovaproto/novaproto.h"
 #include "stb_image.h"
+
+typedef struct {
+    uint32_t text_primary;
+    uint32_t text_error;
+    int      font_size;
+    char     font_path[256];
+} ThemeConfig;
+
+static void theme_load(const char *path, ThemeConfig *t) {
+    (void)path;
+    t->text_primary = 0xFFFFFFFF;
+    t->text_error = 0xFFF38BA8;
+    t->font_size = 12;
+    strcpy(t->font_path, "/Library/Fonts/Proggy.ttf");
+}
+
+static void ui_font_init(const char *path, int size) {
+    (void)path;
+    (void)size;
+}
+
+static void ui_blend_pixels(uint32_t *dest, int dest_w, int dest_h, int x, int y, uint32_t *src, int src_w, int src_h, float alpha) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        ntk_painter_blend_buffer(p, x, y, src, src_w, src_h, alpha);
+        ntk_painter_destroy(p);
+    }
+}
+
+static void ui_draw_string(uint32_t *dest, int dest_w, int dest_h, int x, int y, const char *text, uint32_t color) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        NtkStyle *style = ntk_style_get_global();
+        NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        if (font) ntk_painter_set_font(p, font);
+        ntk_painter_set_color(p, color);
+        NtkRect r = NTK_RECT(x, y, dest_w - x, 24);
+        ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_START);
+        ntk_painter_destroy(p);
+    }
+}
+
+static void ui_draw_string_rect(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, const char *text, uint32_t color) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        NtkStyle *style = ntk_style_get_global();
+        NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        if (font) ntk_painter_set_font(p, font);
+        ntk_painter_set_color(p, color);
+        NtkRect r = NTK_RECT(x, y, w, h);
+        ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_START);
+        ntk_painter_destroy(p);
+    }
+}
+
+static void ui_draw_string_rect_centered(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, const char *text, uint32_t color) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        NtkStyle *style = ntk_style_get_global();
+        NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        if (font) ntk_painter_set_font(p, font);
+        ntk_painter_set_color(p, color);
+        NtkRect r = NTK_RECT(x, y, w, h);
+        ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_CENTER);
+        ntk_painter_destroy(p);
+    }
+}
+
+static uint32_t lerp_color(uint32_t c1, uint32_t c2, float t) {
+    uint8_t a1 = (c1 >> 24) & 0xFF, r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+    uint8_t a2 = (c2 >> 24) & 0xFF, r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+    uint8_t a = a1 + (a2 - a1) * t;
+    uint8_t r = r1 + (r2 - r1) * t;
+    uint8_t g = g1 + (g2 - g1) * t;
+    uint8_t b = b1 + (b2 - b1) * t;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+static void ui_draw_panel(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, uint32_t bg_color, int shadow, int border) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        ntk_painter_set_color(p, bg_color);
+        ntk_painter_fill_rect(p, NTK_RECT(x, y, w, h));
+        NtkColor light = 0xFFFFFFFF;
+        NtkColor dark = 0xFF808080;
+        if (shadow == 1) {
+            ntk_painter_draw_bevel_sunken(p, NTK_RECT(x, y, w, h), light, dark);
+        } else if (shadow == 0 && border == 0) {
+            ntk_painter_set_color(p, dark);
+            ntk_painter_draw_rect(p, NTK_RECT(x, y, w, h));
+        } else {
+            ntk_painter_draw_bevel_raised(p, NTK_RECT(x, y, w, h), light, dark);
+        }
+        ntk_painter_destroy(p);
+    }
+}
 
 #define MAX_WINDOWS 32
 #define MAX_APPS 128
@@ -25,28 +122,26 @@
 #define TASKBAR_LAYER 3
 #define MENU_LAYER 4
 
-#define START_BTN_X 0
-#define START_BTN_W 36
-#define START_BTN_H 26
+#define START_BTN_X 2
+#define START_BTN_W 80
+#define START_BTN_H 22
 
-#define TAB_H TASKBAR_HEIGHT
-#define TAB_W 32
-#define MIN_TAB_W 32
-#define MAX_TAB_W 32
-#define TAB_GAP 0
-#define TAB_PADDING 4
-#define TAB_ICON_TEXT_SPACING 0
+#define TAB_H 22
+#define MAX_TAB_W 140
+#define TAB_GAP 4
 
 #define CLOCK_W 80
-#define CLOCK_H 26
+#define CLOCK_H 22
 
-#define MENU_W 400
-#define MENU_H 360
-#define MENU_ACTION_ICON_SIZE 20
-#define MENU_ACTION_ICON_SPACING 10
+#define MENU_W 180
+#define MENU_H 280
+#define SUB_MENU_W 180
+#define SUB_MENU_H 240
+#define MENU_ACTION_ICON_SIZE 16
+#define MENU_ACTION_ICON_SPACING 8
 
-#define DEFAULT_LOGO_PATH "/Library/images/icons/boredos/bOS13.png"
-#define DEFAULT_APP_ICON_PATH "/Library/images/icons/colloid/application-default-icon.png"
+#define DEFAULT_LOGO_PATH "/Library/images/icons/bos.png"
+#define DEFAULT_APP_ICON_PATH "/Library/images/icons/serenityicons/32x32/app-terminal.png"
 #define DESKTOP_APPS_DIR "/usr/share/applications"
 #define DESKTOP_SUFFIX ".desktop"
 #define DEFAULT_DATE_FORMAT "%Y-%m-%d"
@@ -57,6 +152,32 @@ typedef struct {
     int w;
     int h;
 } image_t;
+
+#define NUM_CATEGORIES 7
+static const char *categories[NUM_CATEGORIES] = {
+    "Demos",
+    "Development",
+    "Games",
+    "Graphics",
+    "Internet",
+    "Sound",
+    "Utilities"
+};
+
+static const char *category_icons[NUM_CATEGORIES] = {
+    "/Library/images/icons/serenityicons/16x16/demos.png",
+    "/Library/images/icons/serenityicons/16x16/development.png",
+    "/Library/images/icons/serenityicons/16x16/games.png",
+    "/Library/images/icons/serenityicons/16x16/graphics.png",
+    "/Library/images/icons/serenityicons/16x16/internet.png",
+    "/Library/images/icons/serenityicons/16x16/multimedia.png",
+    "/Library/images/icons/serenityicons/16x16/utilities.png"
+};
+
+static image_t category_icon_imgs[NUM_CATEGORIES];
+static image_t run_icon_img;
+static image_t exit_icon_img;
+static image_t boredos_icon_img;
 
 typedef struct {
     uint32_t surface_id;
@@ -74,20 +195,10 @@ typedef struct {
     char icon_path[256];
     bool terminal;
     image_t icon_img;
+    char category[64];
 } app_entry_t;
 
-#define MENU_ACTION_COUNT 3
-static const char *menu_action_icon_paths[MENU_ACTION_COUNT] = {
-    "/Library/images/icons/colloid/reboot.png",
-    "/Library/images/icons/colloid/shutdown.png",
-    "/Library/images/icons/colloid/log-out.png"
-};
-static const char *menu_action_fallback[MENU_ACTION_COUNT] = {
-    "R",
-    "S",
-    "X"
-};
-static image_t menu_action_icons[MENU_ACTION_COUNT];
+
 
 typedef struct {
     bool position_bottom;
@@ -120,7 +231,6 @@ static uint32_t last_active_surface_id = 0;
 static uint32_t resume_focus_id = 0;
 
 static uint32_t last_bar_click_ms = 0;
-static uint32_t last_menu_click_ms = 0;
 static uint32_t last_bar_buttons = 0;
 static uint32_t last_menu_buttons = 0;
 
@@ -136,6 +246,34 @@ static uint32_t menu_surf_id = 0;
 static uint32_t *menu_pixels = NULL;
 static bool menu_open = false;
 
+static uint32_t sub_menu_surf_id = 0;
+static uint32_t *sub_menu_pixels = NULL;
+static bool sub_menu_open = false;
+static int sub_menu_category_idx = -1;
+static int sub_menu_hover_idx = -1;
+static bool sub_menu_focused = false;
+
+typedef enum {
+    ITEM_ABOUT,
+    ITEM_SEPARATOR,
+    ITEM_CATEGORY,
+    ITEM_RUN,
+    ITEM_EXIT
+} MenuItemType;
+
+typedef struct {
+    MenuItemType type;
+    char label[64];
+    int category_idx;
+    int y;
+    int h;
+} StartMenuItem;
+
+static StartMenuItem start_menu_items[32];
+static int start_menu_item_count = 0;
+static int main_menu_hover_idx = -1;
+static int main_menu_active_height = 0;
+
 static ThemeConfig theme;
 static taskbar_config_t config;
 
@@ -150,6 +288,7 @@ static bool bar_dirty = true;
 static bool should_track_window(uint32_t surface_id, const char *title) {
     if (surface_id == bar_surf_id) return false;
     if (surface_id == menu_surf_id) return false;
+    if (surface_id == sub_menu_surf_id) return false;
     if (!title || title[0] == '\0') return false;
     return true;
 }
@@ -419,10 +558,80 @@ static void draw_image(uint32_t *dest, int dest_w, int dest_h, int x, int y, con
     ui_blend_pixels(dest, dest_w, dest_h, x, y, img->pixels, img->w, img->h, 1.0f);
 }
 
+static bool contains_nocase(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return false;
+    if (!*needle) return true;
+    for (int i = 0; haystack[i]; i++) {
+        int j = 0;
+        while (haystack[i + j] && needle[j]) {
+            char c1 = haystack[i + j];
+            char c2 = needle[j];
+            if (c1 >= 'A' && c1 <= 'Z') c1 = c1 - 'A' + 'a';
+            if (c2 >= 'A' && c2 <= 'Z') c2 = c2 - 'A' + 'a';
+            if (c1 != c2) break;
+            j++;
+        }
+        if (!needle[j]) return true;
+    }
+    return false;
+}
+
+static const app_entry_t *find_app_for_window(const char *title) {
+    if (!title || !title[0]) return NULL;
+    for (int i = 0; i < app_count; i++) {
+        if (contains_nocase(title, apps[i].display_name)) {
+            return &apps[i];
+        }
+    }
+    for (int i = 0; i < app_count; i++) {
+        char base_name[128];
+        copy_string(base_name, sizeof(base_name), apps[i].desktop_file);
+        char *dot = strchr(base_name, '.');
+        if (dot) *dot = '\0';
+
+        if (contains_nocase(title, base_name) || contains_nocase(base_name, title)) {
+            return &apps[i];
+        }
+    }
+
+    // 3. Match by executable name
+    for (int i = 0; i < app_count; i++) {
+        const char *exec_name = strrchr(apps[i].exec, '/');
+        if (exec_name) exec_name++;
+        else exec_name = apps[i].exec;
+
+        char exec_base[128];
+        copy_string(exec_base, sizeof(exec_base), exec_name);
+        char *dot = strchr(exec_base, '.');
+        if (dot) *dot = '\0';
+
+        if (exec_base[0] && (contains_nocase(title, exec_base) || contains_nocase(exec_base, title))) {
+            return &apps[i];
+        }
+    }
+
+    return NULL;
+}
+
 static void add_window(uint32_t surface_id, const char *title, uint32_t state_flags, const char *icon_path) {
     if (!should_track_window(surface_id, title)) return;
 
     bool become_active = (state_flags & 1) != 0;
+    
+    char resolved_path[256] = "";
+    if (icon_path && icon_path[0]) {
+        copy_string(resolved_path, sizeof(resolved_path), icon_path);
+    } else {
+        const app_entry_t *app = find_app_for_window(title);
+        if (app && app->icon_path[0]) {
+            copy_string(resolved_path, sizeof(resolved_path), app->icon_path);
+        } else {
+            copy_string(resolved_path, sizeof(resolved_path), DEFAULT_APP_ICON_PATH);
+        }
+        // Propagate resolved icon to compositor
+        nova_set_icon(fd, surface_id, resolved_path);
+    }
+
     for (int i = 0; i < window_count; i++) {
         if (windows[i].surface_id == surface_id) {
             copy_string(windows[i].title, sizeof(windows[i].title), title);
@@ -434,9 +643,9 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
                 }
                 last_active_surface_id = surface_id;
             }
-            if (icon_path && icon_path[0]) {
+            if (resolved_path[0]) {
                 free_image(&windows[i].icon_img);
-                load_scaled_image(icon_path, 23, 23, &windows[i].icon_img);
+                load_scaled_image(resolved_path, 16, 16, &windows[i].icon_img);
             }
             return;
         }
@@ -454,8 +663,8 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
         windows[window_count].state_flags = state_flags;
         windows[window_count].active = become_active;
         memset(&windows[window_count].icon_img, 0, sizeof(image_t));
-        if (icon_path && icon_path[0]) {
-            load_scaled_image(icon_path, 23, 23, &windows[window_count].icon_img);
+        if (resolved_path[0]) {
+            load_scaled_image(resolved_path, 16, 16, &windows[window_count].icon_img);
         }
         window_count++;
     }
@@ -572,14 +781,36 @@ static void update_window_focus(uint32_t surface_id, uint32_t state_flags) {
     }
 }
 
-static void update_window_title(uint32_t surface_id, const char *title) {
+static void update_window_title(uint32_t surface_id, const char *title, const char *icon_path) {
     for (int i = 0; i < window_count; i++) {
         if (windows[i].surface_id == surface_id) {
-            copy_string(windows[i].title, sizeof(windows[i].title), title);
+            char resolved_path[256] = "";
+            if (icon_path && icon_path[0]) {
+                copy_string(resolved_path, sizeof(resolved_path), icon_path);
+            } else {
+                const app_entry_t *app = find_app_for_window(title);
+                if (app && app->icon_path[0]) {
+                    copy_string(resolved_path, sizeof(resolved_path), app->icon_path);
+                } else {
+                    copy_string(resolved_path, sizeof(resolved_path), DEFAULT_APP_ICON_PATH);
+                }
+            }
+
+            if (strcmp(windows[i].title, title) != 0 || !windows[i].icon_img.pixels) {
+                copy_string(windows[i].title, sizeof(windows[i].title), title);
+                free_image(&windows[i].icon_img);
+                load_scaled_image(resolved_path, 16, 16, &windows[i].icon_img);
+                
+                if (!icon_path || strcmp(icon_path, resolved_path) != 0) {
+                    nova_set_icon(fd, surface_id, resolved_path);
+                }
+                bar_dirty = true;
+            }
             break;
         }
     }
 }
+
 
 static bool str_eq_ci(const char *a, const char *b) {
     if (!a || !b) return false;
@@ -701,16 +932,19 @@ static bool load_desktop_icon(const char *icon, image_t *out) {
     if (!icon || !icon[0] || !out) return false;
 
     if (icon[0] == '/' || strchr(icon, '/')) {
-        return load_scaled_image(icon, 23, 23, out);
+        return load_scaled_image(icon, 16, 16, out);
     }
 
     const char *ext = str_has_suffix(icon, ".png") ? "" : ".png";
     char path[256];
-    snprintf(path, sizeof(path), "/Library/images/icons/colloid/%s%s", icon, ext);
-    if (load_scaled_image(path, 23, 23, out)) return true;
+    snprintf(path, sizeof(path), "/Library/images/icons/serenityicons/16x16/%s%s", icon, ext);
+    if (load_scaled_image(path, 16, 16, out)) return true;
+
+    snprintf(path, sizeof(path), "/Library/images/icons/serenityicons/32x32/%s%s", icon, ext);
+    if (load_scaled_image(path, 16, 16, out)) return true;
 
     snprintf(path, sizeof(path), "/Library/images/icons/%s%s", icon, ext);
-    return load_scaled_image(path, 23, 23, out);
+    return load_scaled_image(path, 16, 16, out);
 }
 
 static void clear_applications(void) {
@@ -726,7 +960,8 @@ static bool add_desktop_application(const char *desktop_file,
                                     const char *name,
                                     const char *exec,
                                     const char *icon,
-                                    bool terminal) {
+                                    bool terminal,
+                                    const char *category) {
     if (app_count >= MAX_APPS || !exec || !exec[0]) return false;
 
     app_entry_t app;
@@ -747,6 +982,7 @@ static bool add_desktop_application(const char *desktop_file,
     if (app.icon_path[0]) {
         load_desktop_icon(app.icon_path, &app.icon_img);
     }
+    copy_string(app.category, sizeof(app.category), category);
 
     apps[app_count++] = app;
     return true;
@@ -763,6 +999,7 @@ static bool load_desktop_file(const char *desktop_file) {
     char exec[256] = "";
     char icon[256] = "";
     char type[64] = "";
+    char categories_raw[256] = "";
     bool no_display = false;
     bool hidden = false;
     bool terminal = false;
@@ -800,6 +1037,8 @@ static bool load_desktop_file(const char *desktop_file) {
             hidden = desktop_bool_true(val);
         } else if (strcmp(key, "Terminal") == 0) {
             terminal = desktop_bool_true(val);
+        } else if (strcmp(key, "Categories") == 0) {
+            copy_string(categories_raw, sizeof(categories_raw), val);
         }
     }
 
@@ -807,7 +1046,42 @@ static bool load_desktop_file(const char *desktop_file) {
 
     if (hidden || no_display) return false;
     if (type[0] && !str_eq_ci(type, "Application")) return false;
-    return add_desktop_application(desktop_file, name, exec, icon, terminal);
+
+    // Resolve primary category
+    char category[64] = "Utilities";
+    if (categories_raw[0] != '\0') {
+        char temp_cats[256];
+        copy_string(temp_cats, sizeof(temp_cats), categories_raw);
+        char *tok = strtok(temp_cats, ";");
+        while (tok) {
+            char *t = trim_spaces(tok);
+            if (str_eq_ci(t, "Demo") || str_eq_ci(t, "Demos")) {
+                strcpy(category, "Demos");
+                break;
+            } else if (str_eq_ci(t, "Development") || str_eq_ci(t, "Dev")) {
+                strcpy(category, "Development");
+                break;
+            } else if (str_eq_ci(t, "Game") || str_eq_ci(t, "Games")) {
+                strcpy(category, "Games");
+                break;
+            } else if (str_eq_ci(t, "Graphics")) {
+                strcpy(category, "Graphics");
+                break;
+            } else if (str_eq_ci(t, "Network") || str_eq_ci(t, "Internet")) {
+                strcpy(category, "Internet");
+                break;
+            } else if (str_eq_ci(t, "AudioVideo") || str_eq_ci(t, "Audio") || str_eq_ci(t, "Video") || str_eq_ci(t, "Sound") || str_eq_ci(t, "Multimedia")) {
+                strcpy(category, "Sound");
+                break;
+            } else if (str_eq_ci(t, "Utility") || str_eq_ci(t, "Utilities") || str_eq_ci(t, "System")) {
+                strcpy(category, "Utilities");
+                break;
+            }
+            tok = strtok(NULL, ";");
+        }
+    }
+
+    return add_desktop_application(desktop_file, name, exec, icon, terminal, category);
 }
 
 static void load_applications(void) {
@@ -927,72 +1201,70 @@ static int get_approx_char_width(char c) {
 
 
 static void draw_taskbar(void) {
-    uint32_t top_color = config.gradient_top_color;
-    uint32_t bottom_color = config.gradient_bottom_color;
-    uint32_t top_a = (top_color >> 24) & 0xFF;
-    uint32_t top_r = (top_color >> 16) & 0xFF;
-    uint32_t top_g = (top_color >> 8) & 0xFF;
-    uint32_t top_b = top_color & 0xFF;
-    uint32_t bot_a = (bottom_color >> 24) & 0xFF;
-    uint32_t bot_r = (bottom_color >> 16) & 0xFF;
-    uint32_t bot_g = (bottom_color >> 8) & 0xFF;
-    uint32_t bot_b = bottom_color & 0xFF;
-
-    int denom = (bar_h > 1) ? (int)(bar_h - 1) : 1;
     for (uint32_t y = 0; y < bar_h; y++) {
-        uint32_t a = lerp_channel(top_a, bot_a, (int)y, denom);
-        uint32_t r = lerp_channel(top_r, bot_r, (int)y, denom);
-        uint32_t g = lerp_channel(top_g, bot_g, (int)y, denom);
-        uint32_t b = lerp_channel(top_b, bot_b, (int)y, denom);
-        uint32_t color = (a << 24) | (r << 16) | (g << 8) | b;
         uint32_t *row = &bar_pixels[y * bar_w];
         for (uint32_t x = 0; x < bar_w; x++) {
-            row[x] = color;
+            row[x] = 0xFFB0B0B0;
         }
     }
 
-    if (config.position_bottom) {
-        for (uint32_t x = 0; x < bar_w; x++) {
-            bar_pixels[x] = config.taskbar_border_color;
-        }
-    } else {
-        for (uint32_t x = 0; x < bar_w; x++) {
-            bar_pixels[(bar_h - 1) * bar_w + x] = config.taskbar_border_color;
-        }
+    for (uint32_t x = 0; x < bar_w; x++) {
+        bar_pixels[x] = 0xFFFFFFFF;
+        bar_pixels[bar_w + x] = 0xFFDFDFDF;
     }
 
-    int start_btn_y = (bar_h - START_BTN_H) / 2;
+    int start_btn_y = 2;
+    ui_draw_panel(bar_pixels, bar_w, bar_h, START_BTN_X, start_btn_y, START_BTN_W, START_BTN_H, 0xFFB0B0B0, menu_open ? 1 : 0, 1);
+    
+    int btn_offset = menu_open ? 1 : 0;
+    int logo_w = logo_img.pixels ? logo_img.w : 0;
+    int logo_x = START_BTN_X + 6 + btn_offset;
+    int logo_y = start_btn_y + (START_BTN_H - 16) / 2 + btn_offset;
     if (logo_img.pixels) {
-        int icon_x = START_BTN_X + (START_BTN_W - logo_img.w) / 2;
-        int icon_y = start_btn_y + (START_BTN_H - logo_img.h) / 2;
-        draw_image(bar_pixels, bar_w, bar_h, icon_x, icon_y, &logo_img);
-    } else {
-        ui_draw_string(bar_pixels, bar_w, bar_h, START_BTN_X + 6, start_btn_y + 6, "Start", theme.text_primary);
+        draw_image(bar_pixels, bar_w, bar_h, logo_x, logo_y, &logo_img);
     }
+    
+    int text_x = logo_x + (logo_w ? logo_w + 6 : 0);
+    ui_draw_string_rect(bar_pixels, bar_w, bar_h, text_x, start_btn_y + btn_offset - 1, START_BTN_W - (text_x - START_BTN_X) - 2, START_BTN_H, "BoredOS", 0xFF000000);
+    ui_draw_string_rect(bar_pixels, bar_w, bar_h, text_x + 1, start_btn_y + btn_offset - 1, START_BTN_W - (text_x - START_BTN_X) - 2, START_BTN_H, "BoredOS", 0xFF000000);
 
     int tab_x = START_BTN_X + START_BTN_W + 10;
-    int tab_y = 0;
     int tab_end = (int)bar_w - CLOCK_W - 10;
 
+    int tab_w = MAX_TAB_W;
+    int max_needed = window_count * (MAX_TAB_W + TAB_GAP);
+    int space_avail = tab_end - tab_x;
+    if (window_count > 0 && max_needed > space_avail) {
+        tab_w = space_avail / window_count - TAB_GAP;
+        if (tab_w < 32) tab_w = 32;
+    }
+
     for (int i = 0; i < window_count; i++) {
-        int tab_w = TAB_W;
         if (tab_x + tab_w > tab_end) break;
 
-        uint32_t tab_bg = config.taskbar_button_bg_color;
+        bool active = windows[i].active;
+        ui_draw_panel(bar_pixels, bar_w, bar_h, tab_x, 2, tab_w, TAB_H, active ? 0xFF989898 : 0xFFB0B0B0, active ? 1 : 0, 1);
 
-        ui_draw_panel(bar_pixels, bar_w, bar_h, tab_x, tab_y, tab_w, bar_h, tab_bg, 0, 0);
-
-        int icon_size = windows[i].icon_img.pixels ? windows[i].icon_img.w : (app_icon_img.pixels ? app_icon_img.w : 0);
-        int icon_x = tab_x + (tab_w - icon_size) / 2;
-        int icon_y = (bar_h - icon_size) / 2;
+        int offset = active ? 1 : 0;
+        int icon_x = tab_x + 6 + offset;
+        int icon_y = 2 + (TAB_H - 16) / 2 + offset;
         if (windows[i].icon_img.pixels) {
             draw_image(bar_pixels, bar_w, bar_h, icon_x, icon_y, &windows[i].icon_img);
         } else if (app_icon_img.pixels) {
             draw_image(bar_pixels, bar_w, bar_h, icon_x, icon_y, &app_icon_img);
         }
 
+        if (tab_w > 48) {
+            int title_x = icon_x + 20;
+            int title_w = tab_w - 30;
+            ui_draw_string_rect(bar_pixels, bar_w, bar_h, title_x, 2 + offset, title_w, TAB_H, windows[i].title, 0xFF000000);
+        }
+
         tab_x += tab_w + TAB_GAP;
     }
+
+    int clock_x = (int)bar_w - CLOCK_W - 4;
+    ui_draw_panel(bar_pixels, bar_w, bar_h, clock_x, 2, CLOCK_W, CLOCK_H, 0xFFB0B0B0, 1, 1);
 
     char time_str[32] = "--:--";
     int dt[6] = {0};
@@ -1009,80 +1281,243 @@ static void draw_taskbar(void) {
         }
     }
 
-    int time_w = get_approx_string_width(time_str);
-    int clock_x = (int)bar_w - time_w - 12;
-    int time_y = (bar_h - theme.font_size) / 2;
-    ui_draw_string(bar_pixels, bar_w, bar_h, clock_x, time_y, time_str, theme.text_primary);
+    ui_draw_string_rect_centered(bar_pixels, bar_w, bar_h, clock_x, 2, CLOCK_W, CLOCK_H, time_str, 0xFF000000);
 
     NovaRect damage = { 0, 0, bar_w, bar_h };
     nova_damage_surface(fd, bar_surf_id, 1, &damage);
 }
 
 
+static int get_apps_in_category(const char *cat_name, const app_entry_t **out_apps) {
+    int count = 0;
+    for (int i = 0; i < app_count; i++) {
+        if (strcmp(apps[i].desktop_file, "about.desktop") == 0) continue;
+        if (strcmp(apps[i].category, cat_name) == 0) {
+            if (out_apps) out_apps[count] = &apps[i];
+            count++;
+        }
+    }
+    return count;
+}
+
+static void rebuild_start_menu_items(void) {
+    start_menu_item_count = 0;
+    int y = 2; 
+        start_menu_items[start_menu_item_count++] = (StartMenuItem){
+        .type = ITEM_ABOUT,
+        .label = "About BoredOS",
+        .category_idx = -1,
+        .y = y,
+        .h = 24
+    };
+    y += 24;
+        start_menu_items[start_menu_item_count++] = (StartMenuItem){
+        .type = ITEM_SEPARATOR,
+        .label = "",
+        .category_idx = -1,
+        .y = y,
+        .h = 8
+    };
+    y += 8;
+    
+    for (int i = 0; i < NUM_CATEGORIES; i++) {
+        if (get_apps_in_category(categories[i], NULL) > 0) {
+            start_menu_items[start_menu_item_count++] = (StartMenuItem){
+                .type = ITEM_CATEGORY,
+                .label = "",
+                .category_idx = i,
+                .y = y,
+                .h = 24
+            };
+            strcpy(start_menu_items[start_menu_item_count - 1].label, categories[i]);
+            y += 24;
+        }
+    }
+    
+    start_menu_items[start_menu_item_count++] = (StartMenuItem){
+        .type = ITEM_SEPARATOR,
+        .label = "",
+        .category_idx = -1,
+        .y = y,
+        .h = 8
+    };
+    y += 8;
+    
+    start_menu_items[start_menu_item_count++] = (StartMenuItem){
+        .type = ITEM_RUN,
+        .label = "Run...",
+        .category_idx = -1,
+        .y = y,
+        .h = 24
+    };
+    y += 24;
+        start_menu_items[start_menu_item_count++] = (StartMenuItem){
+        .type = ITEM_SEPARATOR,
+        .label = "",
+        .category_idx = -1,
+        .y = y,
+        .h = 8
+    };
+    y += 8;
+    
+    start_menu_items[start_menu_item_count++] = (StartMenuItem){
+        .type = ITEM_EXIT,
+        .label = "Exit...",
+        .category_idx = -1,
+        .y = y,
+        .h = 24
+    };
+    y += 24;
+    
+    main_menu_active_height = y + 2;
+}
+
+static int menu_visible_y(void);
+static void draw_submenu(void);
+
+static int get_submenu_y(int item_idx) {
+    int main_y = menu_visible_y();
+    if (item_idx < 0 || item_idx >= start_menu_item_count) {
+        return main_y;
+    }
+    
+    int cat_idx = start_menu_items[item_idx].category_idx;
+    if (cat_idx < 0 || cat_idx >= NUM_CATEGORIES) {
+        return main_y;
+    }
+    
+    int y_offset_main = config.position_bottom ? (MENU_H - main_menu_active_height) : 0;
+    int item_y = start_menu_items[item_idx].y + y_offset_main;
+    
+    int sub_y = 0;
+    if (config.position_bottom) {
+        const app_entry_t *sub_apps[32];
+        int sub_app_count = get_apps_in_category(categories[cat_idx], sub_apps);
+        int sub_menu_active_height = 4 + sub_app_count * 24;
+        
+        sub_y = main_y + item_y + start_menu_items[item_idx].h - SUB_MENU_H;
+        
+        int min_sub_y = sub_menu_active_height - SUB_MENU_H;
+        if (sub_y < min_sub_y) {
+            sub_y = min_sub_y;
+        }
+    } else {
+        sub_y = main_y + item_y - 2;
+        if (sub_y + SUB_MENU_H > screen_h) {
+            sub_y = screen_h - SUB_MENU_H;
+        }
+        if (sub_y < 0) sub_y = 0;
+    }
+    return sub_y;
+}
+
 static void draw_menu(void) {
     if (!menu_pixels) return;
 
-    ui_draw_panel(menu_pixels, MENU_W, MENU_H, 0, 0, MENU_W, MENU_H,
-                  config.launcher_bg_color | 0xFF000000, config.launcher_border_color, 0);
+    memset(menu_pixels, 0, MENU_W * MENU_H * 4);
+    rebuild_start_menu_items();
 
-    int action_y = 15;
-    int action_x = 15;
-    for (int i = 0; i < MENU_ACTION_COUNT; i++) {
-        ui_draw_panel(menu_pixels, MENU_W, MENU_H, action_x, action_y,
-                      MENU_ACTION_ICON_SIZE, MENU_ACTION_ICON_SIZE,
-                      config.launcher_search_bg_color | 0xFF000000,
-                      config.launcher_border_color, 4);
+    int y_offset = config.position_bottom ? (MENU_H - main_menu_active_height) : 0;
+    ui_draw_panel(menu_pixels, MENU_W, MENU_H, 0, y_offset, MENU_W, main_menu_active_height, 0xFFFFFFFF, 0, 1);
 
-        if (menu_action_icons[i].pixels) {
-            draw_image(menu_pixels, MENU_W, MENU_H, action_x, action_y, &menu_action_icons[i]);
+    for (int y = y_offset + 2; y < y_offset + main_menu_active_height - 2; y++) {
+        for (int x = 2; x <= 31; x++) {
+            menu_pixels[y * MENU_W + x] = 0xFFB0B0B0; 
+        }
+        menu_pixels[y * MENU_W + 32] = 0xFF808080; 
+    }
+
+    for (int i = 0; i < start_menu_item_count; i++) {
+        StartMenuItem item = start_menu_items[i];
+        int item_y = item.y + y_offset;
+
+        if (item.type == ITEM_SEPARATOR) {
+            int mid_y = item_y + item.h / 2;
+            for (int px = 33; px < MENU_W - 3; px++) {
+                menu_pixels[mid_y * MENU_W + px] = 0xFFC0C0C0; 
+            }
         } else {
-            ui_draw_string(menu_pixels, MENU_W, MENU_H, action_x + 6, action_y + 6,
-                           menu_action_fallback[i], theme.text_primary);
+            bool hovered = (i == main_menu_hover_idx);
+            uint32_t text_col = hovered ? 0xFFFFFFFF : 0xFF000000;
+
+            if (hovered) {
+                ui_draw_panel(menu_pixels, MENU_W, MENU_H, 33, item_y, MENU_W - 36, item.h, 0xFF000080, 0, 0);
+            }
+
+            const image_t *icon_img = NULL;
+            if (item.type == ITEM_ABOUT) {
+                icon_img = boredos_icon_img.pixels ? &boredos_icon_img : &app_icon_img;
+            } else if (item.type == ITEM_CATEGORY) {
+                icon_img = category_icon_imgs[item.category_idx].pixels ? &category_icon_imgs[item.category_idx] : &app_icon_img;
+            } else if (item.type == ITEM_RUN) {
+                icon_img = run_icon_img.pixels ? &run_icon_img : &app_icon_img;
+            } else if (item.type == ITEM_EXIT) {
+                icon_img = exit_icon_img.pixels ? &exit_icon_img : &app_icon_img;
+            }
+
+            if (icon_img && icon_img->pixels) {
+                int icon_size = icon_img->w;
+                int icon_x = 9; 
+                int icon_y = item_y + (item.h - icon_size) / 2;
+                draw_image(menu_pixels, MENU_W, MENU_H, icon_x, icon_y, icon_img);
+            }
+
+            ui_draw_string(menu_pixels, MENU_W, MENU_H, 42, item_y, item.label, text_col);
+
+            if (item.type == ITEM_CATEGORY) {
+                int arrow_x = MENU_W - 14;
+                int arrow_y = item_y + (item.h - 8) / 2;
+                for (int ay = 0; ay < 9; ay++) {
+                    int w = 5 - abs(4 - ay);
+                    for (int ax = 0; ax < w; ax++) {
+                        menu_pixels[(arrow_y + ay) * MENU_W + (arrow_x + ax)] = text_col;
+                    }
+                }
+            }
         }
-        action_x += MENU_ACTION_ICON_SIZE + MENU_ACTION_ICON_SPACING;
-    }
-
-    int search_y = action_y + MENU_ACTION_ICON_SIZE + 10;
-    ui_draw_panel(menu_pixels, MENU_W, MENU_H, 15, search_y, MENU_W - 30, 32,
-                  config.launcher_search_bg_color | 0xFF000000, config.launcher_border_color, 0);
-
-    if (search_len == 0) {
-        ui_draw_string(menu_pixels, MENU_W, MENU_H, 25, search_y + 8, "Search...", 0xFF6C7086);
-    } else {
-        ui_draw_string(menu_pixels, MENU_W, MENU_H, 25, search_y + 8, search_buf, theme.text_primary);
-    }
-
-    int y = search_y + 32 + 15;
-    for (int i = 0; i < filtered_count && y < MENU_H - 20; i++) {
-        uint32_t item_bg = (i == selected_idx) ? config.launcher_selected_bg_color : 0;
-        uint32_t item_text = (i == selected_idx) ? 0xFFFFFFFF : theme.text_primary;
-
-        if (i == selected_idx) {
-            ui_draw_panel(menu_pixels, MENU_W, MENU_H, 15, y, MENU_W - 30, ITEM_HEIGHT, item_bg, 0, 0);
-        }
-
-        const image_t *icon_img = filtered_apps[i].icon_img.pixels ? &filtered_apps[i].icon_img : &app_icon_img;
-        int icon_size = icon_img->pixels ? icon_img->w : 0;
-        int icon_x = 25;
-        int icon_y = y + (ITEM_HEIGHT - icon_size) / 2;
-        if (icon_img->pixels) {
-            draw_image(menu_pixels, MENU_W, MENU_H, icon_x, icon_y, icon_img);
-        }
-
-        int text_x = 25 + (icon_size ? icon_size + 6 : 0);
-        ui_draw_string(menu_pixels, MENU_W, MENU_H, text_x, y + 8, filtered_apps[i].display_name, item_text);
-        y += ITEM_HEIGHT + 4;
-    }
-
-    if (filtered_count == 0) {
-        ui_draw_string(menu_pixels, MENU_W, MENU_H, 25, y + 10, "No apps found", theme.text_error);
     }
 
     NovaRect damage = { 0, 0, MENU_W, MENU_H };
     nova_damage_surface(fd, menu_surf_id, 1, &damage);
 }
 
-static void close_menu(void);
+static void draw_submenu(void) {
+    if (!sub_menu_pixels || sub_menu_category_idx < 0 || sub_menu_category_idx >= NUM_CATEGORIES) return;
+
+    const app_entry_t *sub_apps[32];
+    int sub_app_count = get_apps_in_category(categories[sub_menu_category_idx], sub_apps);
+    int sub_menu_active_height = 4 + sub_app_count * 24;
+
+    memset(sub_menu_pixels, 0, SUB_MENU_W * SUB_MENU_H * 4);
+    
+    int y_offset = config.position_bottom ? (SUB_MENU_H - sub_menu_active_height) : 0;
+    ui_draw_panel(sub_menu_pixels, SUB_MENU_W, SUB_MENU_H, 0, y_offset, SUB_MENU_W, sub_menu_active_height, 0xFFFFFFFF, 0, 1);
+
+    int y = y_offset + 2;
+    for (int i = 0; i < sub_app_count; i++) {
+        const app_entry_t *app = sub_apps[i];
+        bool hovered = (i == sub_menu_hover_idx);
+        uint32_t text_col = hovered ? 0xFFFFFFFF : 0xFF000000;
+
+        if (hovered) {
+            ui_draw_panel(sub_menu_pixels, SUB_MENU_W, SUB_MENU_H, 2, y, SUB_MENU_W - 4, 24, 0xFF000080, 0, 0);
+        }
+
+        const image_t *icon_img = app->icon_img.pixels ? &app->icon_img : &app_icon_img;
+        int icon_size = icon_img->pixels ? icon_img->w : 0;
+        int icon_x = 8;
+        int icon_y = y + (24 - icon_size) / 2;
+        if (icon_img->pixels) {
+            draw_image(sub_menu_pixels, SUB_MENU_W, SUB_MENU_H, icon_x, icon_y, icon_img);
+        }
+
+        ui_draw_string(sub_menu_pixels, SUB_MENU_W, SUB_MENU_H, 34, y, app->display_name, text_col);
+        y += 24;
+    }
+
+    NovaRect damage = { 0, 0, SUB_MENU_W, SUB_MENU_H };
+    nova_damage_surface(fd, sub_menu_surf_id, 1, &damage);
+}
 
 static int menu_hidden_x(void) {
     return -MENU_W - 16;
@@ -1097,6 +1532,8 @@ static int menu_visible_y(void) {
     return menu_y < 0 ? 0 : menu_y;
 }
 
+static void close_menu(void);
+
 static void destroy_menu_surface(void) {
     if (menu_surf_id) {
         nova_destroy_surface(fd, menu_surf_id);
@@ -1106,7 +1543,16 @@ static void destroy_menu_surface(void) {
         munmap(menu_pixels, MENU_W * MENU_H * 4);
         menu_pixels = NULL;
     }
+    if (sub_menu_surf_id) {
+        nova_destroy_surface(fd, sub_menu_surf_id);
+        sub_menu_surf_id = 0;
+    }
+    if (sub_menu_pixels) {
+        munmap(sub_menu_pixels, SUB_MENU_W * SUB_MENU_H * 4);
+        sub_menu_pixels = NULL;
+    }
     menu_open = false;
+    sub_menu_open = false;
 }
 
 static void close_taskbar(void) {
@@ -1126,24 +1572,6 @@ static void close_taskbar(void) {
         fd = -1;
     }
     exit(0);
-}
-
-static void perform_menu_action(int action_idx) {
-    close_menu();
-    switch (action_idx) {
-        case 0:
-            sys_system(SYSTEM_CMD_REBOOT, 0, 0, 0, 0);
-            break;
-        case 1:
-            sys_system(SYSTEM_CMD_SHUTDOWN, 0, 0, 0, 0);
-            break;
-        case 2:
-            nova_quit(fd);
-            close_taskbar();
-            break;
-        default:
-            break;
-    }
 }
 
 static bool spawn_app_entry(const app_entry_t *app) {
@@ -1174,27 +1602,158 @@ static bool spawn_app_entry(const app_entry_t *app) {
     return false;
 }
 
-static bool launch_selected_app(void) {
-    if (selected_idx >= 0 && selected_idx < filtered_count) {
-        return spawn_app_entry(&filtered_apps[selected_idx]);
+
+static bool ensure_submenu_surface(void) {
+    if (sub_menu_surf_id && sub_menu_pixels) return true;
+
+    char shm_path[128];
+    if (nova_create_surface(fd, SUB_MENU_W, SUB_MENU_H, MENU_LAYER, SURFACE_FLAG_TRANSPARENT, &sub_menu_surf_id, shm_path) < 0) {
+        return false;
     }
-    return false;
+
+    int shm_fd = open(shm_path, O_RDWR);
+    if (shm_fd < 0) {
+        nova_destroy_surface(fd, sub_menu_surf_id);
+        sub_menu_surf_id = 0;
+        return false;
+    }
+
+    sub_menu_pixels = mmap(NULL, SUB_MENU_W * SUB_MENU_H * 4, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    close(shm_fd);
+    if (sub_menu_pixels == MAP_FAILED) {
+        sub_menu_pixels = NULL;
+        nova_destroy_surface(fd, sub_menu_surf_id);
+        sub_menu_surf_id = 0;
+        return false;
+    }
+
+    nova_move_surface(fd, sub_menu_surf_id, -SUB_MENU_W - 16, 0);
+    return true;
 }
 
-static void reset_menu_search(void) {
-    search_len = 0;
-    search_buf[0] = '\0';
-    selected_idx = 0;
-    apply_filter();
+static void handle_menu_pointer(int px, int py, uint32_t buttons) {
+    (void)px;
+    if (!menu_open) return;
+
+    bool left_pressed = (buttons & 1) != 0;
+    bool left_went_down = left_pressed && ((last_menu_buttons & 1) == 0);
+    last_menu_buttons = buttons;
+
+    int y_offset_main = config.position_bottom ? (MENU_H - main_menu_active_height) : 0;
+    int new_hover_idx = -1;
+    for (int i = 0; i < start_menu_item_count; i++) {
+        StartMenuItem item = start_menu_items[i];
+        if (py >= item.y + y_offset_main && py < item.y + y_offset_main + item.h) {
+            if (item.type != ITEM_SEPARATOR) {
+                new_hover_idx = i;
+            }
+            break;
+        }
+    }
+
+    if (new_hover_idx != main_menu_hover_idx) {
+        main_menu_hover_idx = new_hover_idx;
+        
+        if (new_hover_idx >= 0 && start_menu_items[new_hover_idx].type == ITEM_CATEGORY) {
+            int cat_idx = start_menu_items[new_hover_idx].category_idx;
+            sub_menu_category_idx = cat_idx;
+            sub_menu_hover_idx = -1;
+            sub_menu_open = true;
+            
+            if (ensure_submenu_surface()) {
+                int main_x = 0;
+                int sub_x = main_x + MENU_W - 2;
+                int sub_y = get_submenu_y(new_hover_idx);
+                
+                nova_move_surface(fd, sub_menu_surf_id, sub_x, sub_y);
+                draw_submenu();
+            }
+        } else {
+            sub_menu_open = false;
+            sub_menu_category_idx = -1;
+            sub_menu_hover_idx = -1;
+            if (sub_menu_surf_id) {
+                nova_move_surface(fd, sub_menu_surf_id, -SUB_MENU_W - 16, 0);
+            }
+        }
+        draw_menu();
+    }
+
+    if (left_went_down && new_hover_idx >= 0) {
+        StartMenuItem item = start_menu_items[new_hover_idx];
+        if (item.type == ITEM_ABOUT) {
+            for (int i = 0; i < app_count; i++) {
+                if (strcmp(apps[i].desktop_file, "about.desktop") == 0) {
+                    spawn_app_entry(&apps[i]);
+                    break;
+                }
+            }
+            close_menu();
+        } else if (item.type == ITEM_RUN) {
+            for (int i = 0; i < app_count; i++) {
+                if (strcmp(apps[i].desktop_file, "run.desktop") == 0) {
+                    spawn_app_entry(&apps[i]);
+                    break;
+                }
+            }
+            close_menu();
+        } else if (item.type == ITEM_EXIT) {
+            nova_quit(fd);
+            close_taskbar();
+            close_menu();
+        }
+    }
+}
+
+static void handle_submenu_pointer(int px, int py, uint32_t buttons) {
+    (void)px;
+    if (!menu_open || !sub_menu_open || sub_menu_category_idx < 0) return;
+
+    bool left_pressed = (buttons & 1) != 0;
+    bool left_went_down = left_pressed && ((last_menu_buttons & 1) == 0);
+    last_menu_buttons = buttons;
+
+    const app_entry_t *sub_apps[32];
+    int sub_app_count = get_apps_in_category(categories[sub_menu_category_idx], sub_apps);
+
+    int y_offset_sub = config.position_bottom ? (SUB_MENU_H - (4 + sub_app_count * 24)) : 0;
+    int new_hover_idx = -1;
+    int y = y_offset_sub + 2;
+    for (int i = 0; i < sub_app_count; i++) {
+        if (py >= y && py < y + 24) {
+            new_hover_idx = i;
+            break;
+        }
+        y += 24;
+    }
+
+    if (new_hover_idx != sub_menu_hover_idx) {
+        sub_menu_hover_idx = new_hover_idx;
+        draw_submenu();
+    }
+
+    if (left_went_down && new_hover_idx >= 0) {
+        const app_entry_t *app = sub_apps[new_hover_idx];
+        spawn_app_entry(app);
+        close_menu();
+    }
 }
 
 static void close_menu(void) {
     if (!menu_open) return;
     menu_open = false;
+    sub_menu_open = false;
+    sub_menu_category_idx = -1;
+    sub_menu_hover_idx = -1;
+    main_menu_hover_idx = -1;
     last_menu_buttons = 0;
     if (menu_surf_id) {
         nova_set_state(fd, menu_surf_id, 0);
         nova_move_surface(fd, menu_surf_id, menu_hidden_x(), menu_hidden_y());
+    }
+    if (sub_menu_surf_id) {
+        nova_set_state(fd, sub_menu_surf_id, 0);
+        nova_move_surface(fd, sub_menu_surf_id, -SUB_MENU_W - 16, 0);
     }
 
     if (resume_focus_id != 0) {
@@ -1207,7 +1766,7 @@ static bool ensure_menu_surface(void) {
     if (menu_surf_id && menu_pixels) return true;
 
     char shm_path[128];
-    if (nova_create_surface(fd, MENU_W, MENU_H, MENU_LAYER, 0, &menu_surf_id, shm_path) < 0) {
+    if (nova_create_surface(fd, MENU_W, MENU_H, MENU_LAYER, SURFACE_FLAG_TRANSPARENT, &menu_surf_id, shm_path) < 0) {
         return false;
     }
 
@@ -1237,7 +1796,12 @@ static void open_menu(void) {
 
     resume_focus_id = last_active_surface_id;
     last_menu_buttons = 0;
-    reset_menu_search();
+    main_menu_hover_idx = -1;
+    sub_menu_open = false;
+    sub_menu_category_idx = -1;
+    sub_menu_hover_idx = -1;
+    sub_menu_focused = false;
+    
     menu_open = true;
     nova_move_surface(fd, menu_surf_id, 0, menu_visible_y());
     draw_menu();
@@ -1245,7 +1809,7 @@ static void open_menu(void) {
 }
 
 static void handle_bar_click(int click_x, int click_y) {
-    int start_btn_y = (bar_h - START_BTN_H) / 2;
+    int start_btn_y = 2;
     bool on_start = (click_x >= START_BTN_X && click_x < START_BTN_X + START_BTN_W &&
                      click_y >= start_btn_y && click_y < start_btn_y + START_BTN_H);
 
@@ -1259,15 +1823,21 @@ static void handle_bar_click(int click_x, int click_y) {
     }
 
     int tab_x = START_BTN_X + START_BTN_W + 10;
-    int tab_y = 0;
     int tab_end = (int)bar_w - CLOCK_W - 10;
 
+    int tab_w = MAX_TAB_W;
+    int max_needed = window_count * (MAX_TAB_W + TAB_GAP);
+    int space_avail = tab_end - tab_x;
+    if (window_count > 0 && max_needed > space_avail) {
+        tab_w = space_avail / window_count - TAB_GAP;
+        if (tab_w < 32) tab_w = 32;
+    }
+
     for (int i = 0; i < window_count; i++) {
-        int tab_w = TAB_W;
         if (tab_x + tab_w > tab_end) break;
 
         if (click_x >= tab_x && click_x < tab_x + tab_w &&
-            click_y >= tab_y && click_y < tab_y + bar_h) {
+            click_y >= 2 && click_y < 2 + TAB_H) {
             nova_set_state(fd, windows[i].surface_id, 1 /* active focused state */);
             for (int j = 0; j < window_count; j++) {
                 windows[j].active = (j == i);
@@ -1283,72 +1853,143 @@ static void handle_bar_click(int click_x, int click_y) {
 }
 
 
-static void handle_menu_click(int click_x, int click_y) {
-    int action_y = 15;
-    int action_x = 15;
-    for (int i = 0; i < MENU_ACTION_COUNT; i++) {
-        if (click_x >= action_x && click_x < action_x + MENU_ACTION_ICON_SIZE &&
-            click_y >= action_y && click_y < action_y + MENU_ACTION_ICON_SIZE) {
-            perform_menu_action(i);
-            return;
-        }
-        action_x += MENU_ACTION_ICON_SIZE + MENU_ACTION_ICON_SPACING;
-    }
 
-    int search_y = action_y + MENU_ACTION_ICON_SIZE + 10;
-    int y = search_y + 32 + 15;
-    for (int i = 0; i < filtered_count; i++) {
-        if (click_x >= 15 && click_x < MENU_W - 15 &&
-            click_y >= y && click_y < y + ITEM_HEIGHT) {
-            selected_idx = i;
-            draw_menu();
-            if (launch_selected_app()) {
-                resume_focus_id = 0;
-            }
-            close_menu();
-            return;
-        }
-        y += ITEM_HEIGHT + 4;
-    }
-}
 
 static void handle_menu_key(const NovaEvent *ev) {
     if (!menu_open || !ev) return;
 
     uint32_t kc = ev->data.key.keycode;
     uint8_t pressed = ev->data.key.pressed;
-
     if (!pressed) return;
 
     if (kc == KEY_ESCAPE) {
         close_menu();
-    } else if (kc == KEY_UP) {
-        if (selected_idx > 0) {
-            selected_idx--;
-            draw_menu();
-        }
-    } else if (kc == KEY_DOWN) {
-        if (selected_idx < filtered_count - 1) {
-            selected_idx++;
-            draw_menu();
-        }
-    } else if (kc == KEY_ENTER) {
-        if (selected_idx >= 0 && selected_idx < filtered_count) {
-            if (launch_selected_app()) {
-                resume_focus_id = 0;
+        return;
+    }
+
+    if (sub_menu_open && sub_menu_focused) {
+        const app_entry_t *sub_apps[32];
+        int sub_app_count = get_apps_in_category(categories[sub_menu_category_idx], sub_apps);
+        if (sub_app_count == 0) return;
+
+        if (kc == KEY_UP) {
+            if (sub_menu_hover_idx > 0) {
+                sub_menu_hover_idx--;
+            } else {
+                sub_menu_hover_idx = sub_app_count - 1;
             }
-            close_menu();
-        }
-    } else if (kc == KEY_BACKSPACE) {
-        if (search_len > 0) {
-            search_backspace_utf8();
-            apply_filter();
+            draw_submenu();
+        } else if (kc == KEY_DOWN) {
+            if (sub_menu_hover_idx < sub_app_count - 1) {
+                sub_menu_hover_idx++;
+            } else {
+                sub_menu_hover_idx = 0;
+            }
+            draw_submenu();
+        } else if (kc == KEY_LEFT) {
+            sub_menu_focused = false;
+            sub_menu_hover_idx = -1;
+            draw_submenu();
             draw_menu();
+        } else if (kc == KEY_ENTER) {
+            if (sub_menu_hover_idx >= 0 && sub_menu_hover_idx < sub_app_count) {
+                spawn_app_entry(sub_apps[sub_menu_hover_idx]);
+                close_menu();
+            }
         }
-    } else if (ev->data.key.text_len > 0) {
-        if (search_append_utf8(ev->data.key.text, ev->data.key.text_len)) {
-            apply_filter();
-            draw_menu();
+    } else {
+        if (kc == KEY_UP) {
+            int idx = main_menu_hover_idx;
+            do {
+                if (idx > 0) idx--;
+                else idx = start_menu_item_count - 1;
+            } while (idx != main_menu_hover_idx && start_menu_items[idx].type == ITEM_SEPARATOR);
+            
+            if (start_menu_items[idx].type != ITEM_SEPARATOR) {
+                main_menu_hover_idx = idx;
+                if (start_menu_items[idx].type == ITEM_CATEGORY) {
+                    sub_menu_category_idx = start_menu_items[idx].category_idx;
+                    sub_menu_open = true;
+                    sub_menu_hover_idx = -1;
+                    if (ensure_submenu_surface()) {
+                        int main_x = 0;
+                        int sub_x = main_x + MENU_W - 2;
+                        int sub_y = get_submenu_y(idx);
+                        nova_move_surface(fd, sub_menu_surf_id, sub_x, sub_y);
+                        draw_submenu();
+                    }
+                } else {
+                    sub_menu_open = false;
+                    sub_menu_category_idx = -1;
+                    sub_menu_hover_idx = -1;
+                    if (sub_menu_surf_id) {
+                        nova_move_surface(fd, sub_menu_surf_id, -SUB_MENU_W - 16, 0);
+                    }
+                }
+                draw_menu();
+            }
+        } else if (kc == KEY_DOWN) {
+            int idx = main_menu_hover_idx;
+            do {
+                if (idx < start_menu_item_count - 1) idx++;
+                else idx = 0;
+            } while (idx != main_menu_hover_idx && start_menu_items[idx].type == ITEM_SEPARATOR);
+
+            if (start_menu_items[idx].type != ITEM_SEPARATOR) {
+                main_menu_hover_idx = idx;
+                if (start_menu_items[idx].type == ITEM_CATEGORY) {
+                    sub_menu_category_idx = start_menu_items[idx].category_idx;
+                    sub_menu_open = true;
+                    sub_menu_hover_idx = -1;
+                    if (ensure_submenu_surface()) {
+                        int main_x = 0;
+                        int sub_x = main_x + MENU_W - 2;
+                        int sub_y = get_submenu_y(idx);
+                        nova_move_surface(fd, sub_menu_surf_id, sub_x, sub_y);
+                        draw_submenu();
+                    }
+                } else {
+                    sub_menu_open = false;
+                    sub_menu_category_idx = -1;
+                    sub_menu_hover_idx = -1;
+                    if (sub_menu_surf_id) {
+                        nova_move_surface(fd, sub_menu_surf_id, -SUB_MENU_W - 16, 0);
+                    }
+                }
+                draw_menu();
+            }
+        } else if (kc == KEY_RIGHT) {
+            if (main_menu_hover_idx >= 0 && start_menu_items[main_menu_hover_idx].type == ITEM_CATEGORY) {
+                sub_menu_focused = true;
+                sub_menu_hover_idx = 0;
+                draw_submenu();
+                draw_menu();
+            }
+        } else if (kc == KEY_ENTER) {
+            if (main_menu_hover_idx >= 0) {
+                StartMenuItem item = start_menu_items[main_menu_hover_idx];
+                if (item.type == ITEM_ABOUT) {
+                    for (int i = 0; i < app_count; i++) {
+                        if (strcmp(apps[i].desktop_file, "about.desktop") == 0) {
+                            spawn_app_entry(&apps[i]);
+                            break;
+                        }
+                    }
+                    close_menu();
+                } else if (item.type == ITEM_RUN) {
+                    for (int i = 0; i < app_count; i++) {
+                        if (strcmp(apps[i].desktop_file, "run.desktop") == 0) {
+                            spawn_app_entry(&apps[i]);
+                            break;
+                        }
+                    }
+                    close_menu();
+                } else if (item.type == ITEM_EXIT) {
+                    nova_quit(fd);
+                    close_taskbar();
+                    close_menu();
+                }
+            }
         }
     }
 }
@@ -1362,14 +2003,16 @@ int main(int argc, char *argv[]) {
 
     load_taskbar_config("/etc/nova/taskbar.conf", &config);
 
-    load_scaled_image(config.logo_path, 20, 20, &logo_img);
-    load_scaled_image(DEFAULT_APP_ICON_PATH, 23, 23, &app_icon_img);
-    for (int i = 0; i < MENU_ACTION_COUNT; i++) {
-        load_scaled_image(menu_action_icon_paths[i], MENU_ACTION_ICON_SIZE, MENU_ACTION_ICON_SIZE, &menu_action_icons[i]);
+    load_scaled_image(config.logo_path, 16, 16, &logo_img);
+    load_scaled_image(DEFAULT_APP_ICON_PATH, 16, 16, &app_icon_img);
+    load_scaled_image("/Library/images/icons/bos.png", 16, 16, &boredos_icon_img);
+    load_scaled_image("/Library/images/icons/serenityicons/16x16/app-run.png", 16, 16, &run_icon_img);
+    load_scaled_image("/Library/images/icons/serenityicons/16x16/power.png", 16, 16, &exit_icon_img);
+    for (int i = 0; i < NUM_CATEGORIES; i++) {
+        load_scaled_image(category_icons[i], 16, 16, &category_icon_imgs[i]);
     }
 
     load_applications();
-    apply_filter();
 
     fd = nova_connect(NULL);
     if (fd < 0) {
@@ -1455,7 +2098,7 @@ int main(int argc, char *argv[]) {
                             needs_draw = true;
                             break;
                         case EVT_WINDOW_TITLE_CHANGED:
-                            update_window_title(ev.surface_id, ev.data.window.title);
+                            update_window_title(ev.surface_id, ev.data.window.title, ev.data.window.icon_path);
                             needs_draw = true;
                             break;
                         case EVT_STATE_CHANGED:
@@ -1468,8 +2111,8 @@ int main(int argc, char *argv[]) {
                             break;
                         case EVT_POINTER: {
                             uint32_t buttons = ev.data.pointer.buttons;
-                            bool left_pressed = (buttons & 1) != 0;
                             if (ev.surface_id == bar_surf_id) {
+                                bool left_pressed = (buttons & 1) != 0;
                                 bool left_went_down = left_pressed && ((last_bar_buttons & 1) == 0);
                                 last_bar_buttons = buttons;
                                 if (left_went_down && now - last_bar_click_ms > 80) {
@@ -1477,12 +2120,9 @@ int main(int argc, char *argv[]) {
                                     handle_bar_click(ev.data.pointer.x, ev.data.pointer.y);
                                 }
                             } else if (ev.surface_id == menu_surf_id) {
-                                bool left_went_down = left_pressed && ((last_menu_buttons & 1) == 0);
-                                last_menu_buttons = buttons;
-                                if (menu_open && left_went_down && now - last_menu_click_ms > 80) {
-                                    last_menu_click_ms = now;
-                                    handle_menu_click(ev.data.pointer.x, ev.data.pointer.y);
-                                }
+                                handle_menu_pointer(ev.data.pointer.x, ev.data.pointer.y, buttons);
+                            } else if (sub_menu_open && ev.surface_id == sub_menu_surf_id) {
+                                handle_submenu_pointer(ev.data.pointer.x, ev.data.pointer.y, buttons);
                             }
                             break;
                         }

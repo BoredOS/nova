@@ -26,6 +26,7 @@
 #define MSG_QUERY_WINDOWS       11
 #define MSG_SET_FLAGS           12
 #define MSG_QUIT                13
+#define MSG_GET_SURFACE_GEOMETRY 14
 
 // Event Types (Nova -> Client)
 #define EVT_KEY                 101
@@ -111,5 +112,6 @@ int nova_query_windows(int fd);
 int nova_quit(int fd);
 int nova_poll_event(int fd, NovaEvent *event_out);
 int nova_pending_events(void);
+int nova_get_surface_geometry(int fd, uint32_t surf_id, int *x_out, int *y_out, uint32_t *w_out, uint32_t *h_out);
 
 #endif

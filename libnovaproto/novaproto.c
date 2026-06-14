@@ -406,3 +406,26 @@ int nova_poll_event(int fd, NovaEvent *event_out) {
 int nova_pending_events(void) {
     return event_queue_head != event_queue_tail;
 }
+
+int nova_get_surface_geometry(int fd, uint32_t surf_id, int *x_out, int *y_out, uint32_t *w_out, uint32_t *h_out) {
+    uint32_t payload = surf_id;
+    if (send_frame(fd, MSG_GET_SURFACE_GEOMETRY, &payload, sizeof(payload)) < 0) {
+        return -1;
+    }
+
+    struct {
+        uint32_t surface_id;
+        int x, y;
+        uint32_t w, h;
+    } __attribute__((packed)) reply;
+
+    if (recv_sync_reply(fd, MSG_GET_SURFACE_GEOMETRY, &reply, sizeof(reply)) < 0) {
+        return -1;
+    }
+
+    if (x_out) *x_out = reply.x;
+    if (y_out) *y_out = reply.y;
+    if (w_out) *w_out = reply.w;
+    if (h_out) *h_out = reply.h;
+    return 0;
+}

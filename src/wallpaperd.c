@@ -1,5 +1,11 @@
+// Copyright (c) 2023-2026 Christiaan (chris@boreddev.nl)
+// This software is released under the GNU General Public License v3.0. See LICENSE file for details.
+// This header needs to maintain in any file it is present in, as per the GPL license terms.
+
 // BOREDOS_APP_DESC: Background Wallpaper Daemon.
-// BOREDOS_APP_ICONS: /Library/images/icons/colloid/application-default-icon.png
+// BOREDOS_APP_ICONS: /Library/images/icons/serenityicons/32x32/app-terminal.png
+
+#include "ntk.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,28 +13,15 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <syscall.h>
-#include "libnovaproto/novaproto.h"
-#include "libtheme/theme.h"
-#include "stb_image.h"
 
 #define DEFAULT_WALLPAPER "/Library/images/Wallpapers/boredos.png"
 
-static __attribute__((noinline)) void copy_string(char *dst, size_t dst_size, const char *src) {
+static void copy_string(char *dst, size_t dst_size, const char *src) {
     if (!dst || dst_size == 0) return;
     if (!src) src = "";
-
-    volatile const char *vsrc = (volatile const char *)src;
-    size_t i = 0;
-    while (i + 1 < dst_size) {
-        char c = vsrc[i];
-        if (!c) break;
-        dst[i] = c;
-        i++;
-    }
-    dst[i] = '\0';
+    strncpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
 }
 
 static char *trim_spaces(char *str) {
@@ -76,69 +69,17 @@ static void load_wallpaper_path(const char *path, char *out_path, size_t max_len
     fclose(f);
 }
 
-static bool load_file_to_buffer(const char *path, unsigned char **out_buf, size_t *out_size) {
-    if (!path || !out_buf || !out_size) return false;
-
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size <= 0) {
-        fclose(f);
-        return false;
-    }
-
-    unsigned char *buf = malloc((size_t)size);
-    if (!buf) {
-        fclose(f);
-        return false;
-    }
-
-    size_t read_size = fread(buf, 1, (size_t)size, f);
-    fclose(f);
-
-    if (read_size != (size_t)size) {
-        free(buf);
-        return false;
-    }
-
-    *out_buf = buf;
-    *out_size = (size_t)size;
-    return true;
-}
-
 static bool load_and_scale_wallpaper(const char *path, uint32_t *dest_pixels, int screen_w, int screen_h) {
-    unsigned char *file_buf = NULL;
-    size_t file_size = 0;
-    if (!load_file_to_buffer(path, &file_buf, &file_size)) {
-        return false;
-    }
+    NtkPixmap *pm = ntk_pixmap_new_from_file(path);
+    if (!pm) return false;
 
-    int img_w = 0, img_h = 0, comp = 0;
-    unsigned char *rgba = stbi_load_from_memory(file_buf, (int)file_size, &img_w, &img_h, &comp, 4);
-    free(file_buf);
-    if (!rgba || img_w <= 0 || img_h <= 0) {
-        if (rgba) stbi_image_free(rgba);
-        return false;
-    }
+    NtkPixmap *scaled = ntk_pixmap_scale(pm, NTK_SIZE(screen_w, screen_h), NTK_SCALE_STRETCH);
+    ntk_pixmap_destroy(pm);
+    if (!scaled) return false;
 
-    for (int y = 0; y < screen_h; y++) {
-        int src_y = (y * img_h) / screen_h;
-        uint8_t *src_row = &rgba[src_y * img_w * 4];
-        uint32_t *dest_row = &dest_pixels[y * screen_w];
-        for (int x = 0; x < screen_w; x++) {
-            int src_x = (x * img_w) / screen_w;
-            uint8_t r = src_row[src_x * 4 + 0];
-            uint8_t g = src_row[src_x * 4 + 1];
-            uint8_t b = src_row[src_x * 4 + 2];
-            uint8_t a = src_row[src_x * 4 + 3];
-            dest_row[x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-        }
-    }
-
-    stbi_image_free(rgba);
+    unsigned char *data = ntk_pixmap_get_data(scaled);
+    memcpy(dest_pixels, data, screen_w * screen_h * 4);
+    ntk_pixmap_destroy(scaled);
     return true;
 }
 
@@ -146,68 +87,63 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
-    ThemeConfig theme;
-    theme_load("/etc/nova/nova.conf", &theme);
+    NtkStyle *style = ntk_style_new_from_file("/etc/nova/nova.conf");
+    if (!style) {
+        style = ntk_style_new_from_file("/Library/conf/nova.conf");
+    }
+    NtkColor desktop_bg = 0xFF3C3C3C;
+    if (style) {
+        desktop_bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG);
+        ntk_style_destroy(style);
+    }
 
     char wallpaper_path[256];
     load_wallpaper_path("/etc/nova/wallpaper.conf", wallpaper_path, sizeof(wallpaper_path));
 
-    int fd = nova_connect(NULL);
+    int fd = ntk_nova_connect(NULL);
     if (fd < 0) {
         fprintf(stderr, "Wallpaperd Error: Cannot connect to Nova socket\n");
         return 1;
     }
 
-    int screen_w = 1024;
-    int screen_h = 768;
-
-    struct fb_var_screeninfo vinfo;
-    int fb = open("/dev/fb0", O_RDONLY);
-    if (fb >= 0) {
-        if (ioctl(fb, FBIOGET_VSCREENINFO, &vinfo) == 0) {
-            screen_w = vinfo.xres;
-            screen_h = vinfo.yres;
-        }
-        close(fb);
-    }
+    NtkSize screen_sz = ntk_nova_get_screen_size(fd);
 
     uint32_t surf_id = 0;
     char shm_path[128];
     // Background layer is 0
-    if (nova_create_surface(fd, screen_w, screen_h, 0, 0, &surf_id, shm_path) < 0) {
+    if (ntk_nova_create_surface(fd, screen_sz.width, screen_sz.height, 0, 0, &surf_id, shm_path) < 0) {
         fprintf(stderr, "Wallpaperd Error: Surface allocation failed\n");
-        close(fd);
+        ntk_nova_disconnect(fd);
         return 1;
     }
 
     int shm_fd = open(shm_path, O_RDWR);
     if (shm_fd < 0) {
         fprintf(stderr, "Wallpaperd Error: Cannot open SHM segment %s\n", shm_path);
-        close(fd);
+        ntk_nova_disconnect(fd);
         return 1;
     }
 
-    uint32_t *pixels = mmap(NULL, screen_w * screen_h * 4, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    uint32_t *pixels = mmap(NULL, screen_sz.width * screen_sz.height * 4, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     close(shm_fd);
     if (pixels == MAP_FAILED) {
         fprintf(stderr, "Wallpaperd Error: mmap failed\n");
-        close(fd);
+        ntk_nova_disconnect(fd);
         return 1;
     }
 
-    // Set fallback solid background color in case image load fails
-    for (int i = 0; i < screen_w * screen_h; i++) {
-        pixels[i] = theme.desktop_bg;
+    for (int i = 0; i < screen_sz.width * screen_sz.height; i++) {
+        pixels[i] = desktop_bg;
     }
 
     // Load and scale image to screen buffer
-    load_and_scale_wallpaper(wallpaper_path, pixels, screen_w, screen_h);
+    load_and_scale_wallpaper(wallpaper_path, pixels, screen_sz.width, screen_sz.height);
 
     // Damage entire surface to draw it
-    NovaRect damage = { 0, 0, screen_w, screen_h };
-    nova_damage_surface(fd, surf_id, 1, &damage);
+    NtkRect damage = NTK_RECT(0, 0, screen_sz.width, screen_sz.height);
+    ntk_nova_damage_surface(fd, surf_id, 1, &damage);
 
-    // Low power event polling loop to maintain socket connection with the compositor
+    // Event loop
     struct pollfd pfd;
     pfd.fd = fd;
     pfd.events = POLLIN;
@@ -215,15 +151,14 @@ int main(int argc, char *argv[]) {
     while (1) {
         int pr = poll(&pfd, 1, 1000);
         if (pr > 0 && (pfd.revents & POLLIN)) {
-            NovaEvent ev;
-            if (nova_poll_event(fd, &ev) < 0) {
-                // Connection closed by compositor
+            NtkEvent ev;
+            if (ntk_nova_poll_event(fd, &ev) < 0) {
                 break;
             }
         }
     }
 
-    munmap(pixels, screen_w * screen_h * 4);
-    close(fd);
+    munmap(pixels, screen_sz.width * screen_sz.height * 4);
+    ntk_nova_disconnect(fd);
     return 0;
 }

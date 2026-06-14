@@ -1,3 +1,6 @@
+// Copyright (c) 2023-2026 Christiaan (chris@boreddev.nl)
+// This software is released under the GNU General Public License v3.0. See LICENSE file for details.
+// This header needs to maintain in any file it is present in, as per the GPL license terms.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,14 +19,171 @@
 #include <signal.h>
 #include <math.h>
 #include "utf-8.h"
-#include "libtheme/theme.h"
-#include "libui/ui.h"
+#include "ntk.h"
 #include "libnovaproto/novaproto.h"
+#include "stb_image.h"
+#define theme_resolve_color ntk_style_resolve_color
+static void ui_font_init(const char *path, int size) {
+    (void)path;
+    (void)size;
+}
+
+static void ui_draw_string(uint32_t *dest, int dest_w, int dest_h, int x, int y, const char *text, uint32_t color) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        NtkStyle *style = ntk_style_get_global();
+        NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        if (font) ntk_painter_set_font(p, font);
+        ntk_painter_set_color(p, color);
+        NtkRect r = NTK_RECT(x, y, dest_w - x, 24);
+        ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_START);
+        ntk_painter_destroy(p);
+    }
+}
+
+static void ui_draw_string_rect(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, const char *text, uint32_t color) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        NtkStyle *style = ntk_style_get_global();
+        NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        if (font) ntk_painter_set_font(p, font);
+        ntk_painter_set_color(p, color);
+        NtkRect r = NTK_RECT(x, y, w, h);
+        ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_START);
+        ntk_painter_destroy(p);
+    }
+}
+
+static int get_title_text_width(const char *text) {
+    if (!text) return 0;
+    NtkStyle *style = ntk_style_get_global();
+    NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+    if (font) {
+        NtkSize sz = ntk_font_measure_text(font, text);
+        return sz.width;
+    }
+    int w = 0;
+    for (int i = 0; text[i]; i++) {
+        char c = text[i];
+        if (c == ':' || c == '.' || c == ' ' || c == 'i' || c == 'l' || c == '1') w += 4;
+        else if (c == '-' || c == '[' || c == ']') w += 6;
+        else if (c == 'm' || c == 'w' || c == 'M' || c == 'W') w += 10;
+        else w += 8;
+    }
+    return w;
+}
+
+static void ui_draw_panel(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, uint32_t bg_color, int shadow, int border) {
+    NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
+    if (p) {
+        ntk_painter_set_color(p, bg_color);
+        ntk_painter_fill_rect(p, NTK_RECT(x, y, w, h));
+        NtkColor light = 0xFFFFFFFF;
+        NtkColor dark = 0xFF808080;
+        if (shadow == 1) {
+            ntk_painter_draw_bevel_sunken(p, NTK_RECT(x, y, w, h), light, dark);
+        } else if (shadow == 0 && border == 0) {
+            ntk_painter_set_color(p, dark);
+            ntk_painter_draw_rect(p, NTK_RECT(x, y, w, h));
+        } else {
+            ntk_painter_draw_bevel_raised(p, NTK_RECT(x, y, w, h), light, dark);
+        }
+        ntk_painter_destroy(p);
+    }
+}
 #include "nova_keymap.h"
 
 #define MAX_CLIENTS 64
-#define TITLEBAR_HEIGHT 26
-#define BORDER_WIDTH 1
+#define TITLEBAR_HEIGHT 20
+#define BORDER_WIDTH 4
+static inline void draw_pixel_safe(uint32_t *buffer, int w, int h, int x, int y, uint32_t color) {
+    if (x >= 0 && x < w && y >= 0 && y < h) {
+        buffer[y * w + x] = color;
+    }
+}
+
+static void draw_line_h_safe(uint32_t *buffer, int w, int h, int x1, int y, int x2, uint32_t color) {
+    if (y < 0 || y >= h) return;
+    int start = x1 < 0 ? 0 : x1;
+    int end = x2 >= w ? w - 1 : x2;
+    uint32_t *row = &buffer[y * w];
+    for (int x = start; x <= end; x++) {
+        row[x] = color;
+    }
+}
+
+static void draw_line_v_safe(uint32_t *buffer, int w, int h, int x, int y1, int y2, uint32_t color) {
+    if (x < 0 || x >= w) return;
+    int start = y1 < 0 ? 0 : y1;
+    int end = y2 >= h ? h - 1 : y2;
+    for (int y = start; y <= end; y++) {
+        buffer[y * w + x] = color;
+    }
+}
+
+static void fill_rect_safe(uint32_t *buffer, int w, int h, int rx, int ry, int rw, int rh, uint32_t color) {
+    int x1 = rx < 0 ? 0 : rx;
+    int y1 = ry < 0 ? 0 : ry;
+    int x2 = rx + rw > w ? w : rx + rw;
+    int y2 = ry + rh > h ? h : ry + rh;
+    for (int y = y1; y < y2; y++) {
+        uint32_t *row = &buffer[y * w];
+        for (int x = x1; x < x2; x++) {
+            row[x] = color;
+        }
+    }
+}
+struct surface;
+static void draw_decorations_icon(uint32_t *buffer, int w, int h, int ix, int iy, const struct surface *surf);
+
+static void draw_title_button(uint32_t *buffer, int w, int h, int bx, int by, int bw, int bh, int type, bool pressed) {
+    fill_rect_safe(buffer, w, h, bx, by, bw, bh, 0xFFB0B0B0);
+
+    if (pressed) {
+        draw_line_v_safe(buffer, w, h, bx, by, by + bh - 1, 0xFF000000);
+        draw_line_h_safe(buffer, w, h, bx, by, bx + bw - 1, 0xFF000000);
+        draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFF000000);
+        draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFF000000);
+        
+        draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFFFFFFFF);
+        draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFFFFFFFF);
+        draw_line_v_safe(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFFFFFFFF);
+        draw_line_h_safe(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFFFFFFFF);
+    } else {
+        draw_line_v_safe(buffer, w, h, bx, by, by + bh - 1, 0xFFFFFFFF);
+        draw_line_h_safe(buffer, w, h, bx, by, bx + bw - 1, 0xFFFFFFFF);
+        draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFFFFFFFF);
+        draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFFFFFFFF);
+        
+        draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFF000000);
+        draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFF000000);
+        draw_line_v_safe(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFF000000);
+        draw_line_h_safe(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFF000000);
+    }
+
+    int ox = pressed ? 1 : 0;
+    int oy = pressed ? 1 : 0;
+    int cx = bx + (bw - 8) / 2 + ox;
+    int cy = by + (bh - 8) / 2 + oy;
+
+    uint32_t icon_color = 0xFF000000;
+
+    if (type == 0) { // Minimize
+        fill_rect_safe(buffer, w, h, cx + 1, cy + 5, 6, 2, icon_color);
+    } else if (type == 1) { // Maximize
+        fill_rect_safe(buffer, w, h, cx, cy, 8, 2, icon_color);
+        draw_line_v_safe(buffer, w, h, cx, cy + 2, cy + 7, icon_color);
+        draw_line_v_safe(buffer, w, h, cx + 7, cy + 2, cy + 7, icon_color);
+        draw_line_h_safe(buffer, w, h, cx, cy + 7, cx + 7, icon_color);
+    } else if (type == 2) { // Close
+        for (int i = 0; i < 8; i++) {
+            draw_pixel_safe(buffer, w, h, cx + i, cy + i, icon_color);
+            draw_pixel_safe(buffer, w, h, cx + 1 + i, cy + i, icon_color);
+            draw_pixel_safe(buffer, w, h, cx + 7 - i, cy + i, icon_color);
+            draw_pixel_safe(buffer, w, h, cx + 6 - i, cy + i, icon_color);
+        }
+    }
+}
 #define RESIZE_EDGE_MARGIN 8
 #define RESIZE_MIN_CONTENT_W 64
 #define RESIZE_MIN_CONTENT_H 48
@@ -87,6 +247,7 @@ typedef struct surface {
     char pending_shm_path[128];
     uint32_t *pending_pixels;
     uint32_t pending_w, pending_h;
+    uint32_t buffer_w, buffer_h;
 
     // Drag states
     bool is_dragging;
@@ -113,6 +274,9 @@ typedef struct surface {
     bool is_maximized;
     int normal_x, normal_y;
     uint32_t normal_w, normal_h;
+
+    uint32_t *icon_pixels;
+    bool icon_loaded;
 
     struct surface *next;
     struct surface *prev;
@@ -142,8 +306,124 @@ static uint32_t *back_buffer = NULL;
 static uint32_t *resize_preview_pixels = NULL;
 static uint32_t resize_preview_capacity = 0;
 
-/* Forward declaration so functions earlier in the file can call it */
 void copy_box_to_fb(int bx, int by, int bw, int bh);
+
+static uint32_t blend_pixel_alpha(uint32_t bg, uint32_t fg) {
+    uint32_t fg_a = (fg >> 24) & 0xFF;
+    if (fg_a == 0) return bg;
+    if (fg_a == 255) return fg;
+    
+    uint32_t bg_a = (bg >> 24) & 0xFF;
+    uint32_t out_a = fg_a + bg_a * (255 - fg_a) / 255;
+    if (out_a == 0) return 0;
+    
+    uint32_t fg_r = (fg >> 16) & 0xFF;
+    uint32_t fg_g = (fg >> 8) & 0xFF;
+    uint32_t fg_b = fg & 0xFF;
+    
+    uint32_t bg_r = (bg >> 16) & 0xFF;
+    uint32_t bg_g = (bg >> 8) & 0xFF;
+    uint32_t bg_b = bg & 0xFF;
+    
+    uint32_t out_r = (fg_r * fg_a + bg_r * bg_a * (255 - fg_a) / 255) / out_a;
+    uint32_t out_g = (fg_g * fg_a + bg_g * bg_a * (255 - fg_a) / 255) / out_a;
+    uint32_t out_b = (fg_b * fg_a + bg_b * bg_a * (255 - fg_a) / 255) / out_a;
+    
+    if (out_r > 255) out_r = 255;
+    if (out_g > 255) out_g = 255;
+    if (out_b > 255) out_b = 255;
+    
+    return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+}
+
+static void surface_load_icon(surface_t *surf) {
+    if (surf->icon_pixels) {
+        free(surf->icon_pixels);
+        surf->icon_pixels = NULL;
+    }
+    surf->icon_loaded = false;
+
+    if (!surf->icon_path[0]) {
+        return;
+    }
+
+    FILE *f = fopen(surf->icon_path, "rb");
+    if (!f) return;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0) {
+        fclose(f);
+        return;
+    }
+
+    unsigned char *file_buf = malloc((size_t)size);
+    if (!file_buf) {
+        fclose(f);
+        return;
+    }
+
+    size_t read_size = fread(file_buf, 1, (size_t)size, f);
+    fclose(f);
+
+    if (read_size != (size_t)size) {
+        free(file_buf);
+        return;
+    }
+
+    int w = 0, h = 0, comp = 0;
+    unsigned char *rgba = stbi_load_from_memory(file_buf, (int)size, &w, &h, &comp, 4);
+    free(file_buf);
+
+    if (!rgba || w <= 0 || h <= 0) {
+        if (rgba) stbi_image_free(rgba);
+        return;
+    }
+
+    uint32_t *scaled = malloc(16 * 16 * sizeof(uint32_t));
+    if (!scaled) {
+        stbi_image_free(rgba);
+        return;
+    }
+
+    for (int y = 0; y < 16; y++) {
+        int src_y = (y * h) / 16;
+        for (int x = 0; x < 16; x++) {
+            int src_x = (x * w) / 16;
+            int src_idx = src_y * w + src_x;
+            uint8_t r = rgba[src_idx * 4 + 0];
+            uint8_t g = rgba[src_idx * 4 + 1];
+            uint8_t b = rgba[src_idx * 4 + 2];
+            uint8_t a = rgba[src_idx * 4 + 3];
+            scaled[y * 16 + x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+    }
+
+    stbi_image_free(rgba);
+    surf->icon_pixels = scaled;
+    surf->icon_loaded = true;
+}
+
+static void draw_decorations_icon(uint32_t *buffer, int w, int h, int ix, int iy, const surface_t *surf) {
+    if (surf->icon_loaded && surf->icon_pixels) {
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                int px = ix + x;
+                int py = iy + y;
+                if (px >= 0 && px < w && py >= 0 && py < h) {
+                    uint32_t fg = surf->icon_pixels[y * 16 + x];
+                    uint32_t bg = buffer[py * w + px];
+                    buffer[py * w + px] = blend_pixel_alpha(bg, fg);
+                }
+            }
+        }
+        return;
+    }
+
+    const char *icon_path = surf->icon_path;
+}
+
 
 // Mouse coordinates
 static int mx = 0;
@@ -153,6 +433,10 @@ static uint32_t pointer_grab_surface_id = 0;
 static int last_cursor_x = -1;
 static int last_cursor_y = -1;
 static bool cursor_visible = false;
+static uint32_t pressed_button_surface_id = 0;
+static int pressed_button_region = 0;
+static uint32_t last_titlebar_click_ms = 0;
+static uint32_t last_titlebar_click_surf_id = 0;
 
 // Bounding box of the dirty region for partial compositing
 static int dirty_x = 0;
@@ -419,17 +703,17 @@ void load_nova_config(const char *path) {
         char *val = trim_config(eq + 1);
 
         if (section[0] == '\0' || streq_ci(section, "theme")) {
-            if (strcmp(key, "active_titlebar_top") == 0) {
+            if (strcmp(key, "titlebar_active_start") == 0) {
                 active_titlebar_top = theme_resolve_color(val, active_titlebar_top);
-            } else if (strcmp(key, "active_titlebar_bottom") == 0) {
+            } else if (strcmp(key, "titlebar_active_end") == 0) {
                 active_titlebar_bottom = theme_resolve_color(val, active_titlebar_bottom);
-            } else if (strcmp(key, "inactive_titlebar_top") == 0) {
+            } else if (strcmp(key, "titlebar_inactive_start") == 0) {
                 inactive_titlebar_top = theme_resolve_color(val, inactive_titlebar_top);
-            } else if (strcmp(key, "inactive_titlebar_bottom") == 0) {
+            } else if (strcmp(key, "titlebar_inactive_end") == 0) {
                 inactive_titlebar_bottom = theme_resolve_color(val, inactive_titlebar_bottom);
-            } else if (strcmp(key, "active_border") == 0) {
+            } else if (strcmp(key, "accent") == 0) {
                 active_border = theme_resolve_color(val, active_border);
-            } else if (strcmp(key, "inactive_border") == 0) {
+            } else if (strcmp(key, "window_bg") == 0) {
                 inactive_border = theme_resolve_color(val, inactive_border);
             }
         }
@@ -737,8 +1021,8 @@ static void queue_resize_request(surface_t *surf, uint32_t new_w, uint32_t new_h
 static void update_resize_drag(surface_t *surf, int mouse_x, int mouse_y) {
     if (!surf || !surf->is_resizing) return;
 
-    uint32_t src_w = surf->resize_start_w;
-    uint32_t src_h = surf->resize_start_h;
+    uint32_t src_w = surf->buffer_w;
+    uint32_t src_h = surf->buffer_h;
     int new_x = surf->resize_start_x;
     int new_y = surf->resize_start_y;
     uint32_t new_w = surf->resize_start_w;
@@ -1095,14 +1379,13 @@ surface_t *surface_at(int px, int py, int *click_region_out) {
             if (px >= curr->x && px < curr->x + (int)curr->w &&
                 py >= curr->y - TITLEBAR_HEIGHT && py < curr->y) {
                 
-                // Check close button (generous 24x26 target area in top-right)
-                if (px >= curr->x + (int)curr->w - 24 && px < curr->x + (int)curr->w &&
-                    py >= curr->y - TITLEBAR_HEIGHT && py < curr->y) {
+                if (px >= curr->x + (int)curr->w - 20 && px < curr->x + (int)curr->w - 4) {
                     region = 2;
                 }
-                // Check minimize button (generous 24x26 target area next to close button)
-                else if (px >= curr->x + (int)curr->w - 48 && px < curr->x + (int)curr->w - 24 &&
-                         py >= curr->y - TITLEBAR_HEIGHT && py < curr->y) {
+                else if (px >= curr->x + (int)curr->w - 38 && px < curr->x + (int)curr->w - 22) {
+                    region = 8;
+                }
+                else if (px >= curr->x + (int)curr->w - 56 && px < curr->x + (int)curr->w - 40) {
                     region = 4;
                 } else {
                     region = 1;
@@ -1110,7 +1393,7 @@ surface_t *surface_at(int px, int py, int *click_region_out) {
                 hit = true;
             }
 
-            if (in_outer && region != 2 && region != 4 && (curr->flags & SURFACE_FLAG_NO_RESIZE) == 0) {
+            if (in_outer && region != 2 && region != 4 && region != 8 && (curr->flags & SURFACE_FLAG_NO_RESIZE) == 0) {
                 bool near_left = px < outer_left + RESIZE_EDGE_MARGIN;
                 bool near_right = px >= outer_right - RESIZE_EDGE_MARGIN;
                 bool near_top = py < outer_top + RESIZE_EDGE_MARGIN;
@@ -1383,8 +1666,8 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
 
     if (draw_x1 < surf->x) draw_x1 = surf->x;
     if (draw_y1 < surf->y) draw_y1 = surf->y;
-    if (draw_x2 > surf->x + (int)surf->w) draw_x2 = surf->x + (int)surf->w;
-    if (draw_y2 > surf->y + (int)surf->h) draw_y2 = surf->y + (int)surf->h;
+    if (draw_x2 > surf->x + (int)surf->buffer_w) draw_x2 = surf->x + (int)surf->buffer_w;
+    if (draw_y2 > surf->y + (int)surf->buffer_h) draw_y2 = surf->y + (int)surf->buffer_h;
     if (draw_x1 < 0) draw_x1 = 0;
     if (draw_y1 < 0) draw_y1 = 0;
     if (draw_x2 > screen_w) draw_x2 = screen_w;
@@ -1402,7 +1685,7 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
 
     for (int y = 0; y < draw_h; y++) {
         uint32_t *dst_row = &back_buffer[(draw_y1 + y) * screen_w + draw_x1];
-        uint32_t *src_row = &surf->pixels[(src_y + y) * surf->w + src_x];
+        uint32_t *src_row = &surf->pixels[(src_y + y) * surf->buffer_w + src_x];
         if (opaque) {
             memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
             continue;
@@ -1541,60 +1824,77 @@ void compositor_composite(void) {
 
                 // Render titlebar if NORMAL or FLOATING window
                 if (draw_decorations) {
-                    // 1. Draw flat content border outline below the titlebar
-                    ui_draw_panel(back_buffer, screen_w, screen_h, 
-                                  curr->x - BORDER_WIDTH, curr->y,
-                                  curr->w + BORDER_WIDTH * 2, curr->h + BORDER_WIDTH,
-                                  0xFF1E1E2E, border_color, 0);
+                    int outer_x = curr->x - BORDER_WIDTH;
+                    int outer_y = curr->y - TITLEBAR_HEIGHT - BORDER_WIDTH;
+                    int outer_w = curr->w + BORDER_WIDTH * 2;
+                    int outer_h = curr->h + TITLEBAR_HEIGHT + BORDER_WIDTH * 2;
+                    
+                    fill_rect_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_w, outer_h, 0xFFB0B0B0);
+                    
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_y + outer_h - 1, 0xFFFFFFFF);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_x + outer_w - 1, 0xFFFFFFFF);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF000000);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF000000);
 
-                    // 2. Draw inner content area dark background
-                    ui_draw_panel(back_buffer, screen_w, screen_h,
-                                  curr->x, curr->y, curr->w, curr->h,
-                                  0xFF1E1E2E, 0, 0);
-
-                    // 3. Draw rounded titlebar panel with vertical gradient
-                    draw_gradient_titlebar(back_buffer, screen_w, screen_h,
-                                           curr->x - BORDER_WIDTH, curr->y - TITLEBAR_HEIGHT - BORDER_WIDTH,
-                                           curr->w + BORDER_WIDTH * 2, TITLEBAR_HEIGHT + BORDER_WIDTH,
-                                           border_color,
-                                           curr->focused ? active_titlebar_top : inactive_titlebar_top,
-                                           curr->focused ? active_titlebar_bottom : inactive_titlebar_bottom,
-                                           8);
-
-                    // Draw titlebar header string text
-                    ui_draw_string(back_buffer, screen_w, screen_h, curr->x + 10, curr->y - 20, curr->title, 0xFFFFFFFF);
-
-                    // Render control buttons on the right side using clean Windows-style icons
-                    uint32_t btn_color = curr->focused ? 0xFFFFFFFF : 0xFF7F849C;
-
-                    // A. Minimize: flat horizontal line at the bottom
-                    int min_bx = curr->x + curr->w - 38;
-                    int min_by = curr->y - 20;
-                    for (int iy = 8; iy <= 9; iy++) {
-                        for (int ix = 2; ix <= 9; ix++) {
-                            int px = min_bx + ix;
-                            int py = min_by + iy;
-                            if (px >= 0 && px < screen_w && py >= 0 && py < screen_h) {
-                                back_buffer[py * screen_w + px] = btn_color;
-                            }
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_y + outer_h - 2, 0xFFFFFFFF);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_x + outer_w - 2, 0xFFFFFFFF);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF000000);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF000000);
+                    uint32_t t_start = curr->focused ? active_titlebar_top : inactive_titlebar_top;
+                    uint32_t t_end = curr->focused ? active_titlebar_bottom : inactive_titlebar_bottom;
+                    int t_x = curr->x;
+                    int t_y = curr->y - TITLEBAR_HEIGHT;
+                    int t_w = curr->w;
+                    int t_h = TITLEBAR_HEIGHT;
+                    
+                    fill_rect_safe(back_buffer, screen_w, screen_h, t_x, t_y, t_w, t_h, 0xFFB0B0B0);
+                    
+                    int title_w = get_title_text_width(curr->title);
+                    int title_block_w = 6 + 16 + 6 + title_w + 12;
+                    int max_title_block_w = t_w - 60;
+                    if (title_block_w > max_title_block_w) {
+                        title_block_w = max_title_block_w;
+                    }
+                    
+                    for (int py = t_y; py < t_y + t_h; py++) {
+                        if (py < 0 || py >= screen_h) continue;
+                        uint32_t *row = &back_buffer[py * screen_w];
+                        for (int px = t_x; px < t_x + t_w; px++) {
+                            if (px < 0 || px >= screen_w) continue;
+                            float t = (float)(px - t_x) / (t_w > 1 ? t_w - 1 : 1);
+                            row[px] = lerp_color(t_start, t_end, t);
                         }
                     }
-
-                    // B. Close: pixel-perfect diagonal cross (X)
-                    int cls_bx = curr->x + curr->w - 20;
-                    int cls_by = curr->y - 20;
-                    for (int i = 0; i <= 7; i++) {
-                        int px1 = cls_bx + 2 + i;
-                        int py1 = cls_by + 2 + i;
-                        int px2 = cls_bx + 9 - i;
-                        int py2 = cls_by + 2 + i;
-                        if (px1 >= 0 && px1 < screen_w && py1 >= 0 && py1 < screen_h) {
-                            back_buffer[py1 * screen_w + px1] = btn_color;
-                        }
-                        if (px2 >= 0 && px2 < screen_w && py2 >= 0 && py2 < screen_h) {
-                            back_buffer[py2 * screen_w + px2] = btn_color;
+                    
+                    int line_start_x = t_x + title_block_w + 4;
+                    int line_end_x = t_x + t_w - 60;
+                    uint32_t line_color = curr->focused ? active_titlebar_top : inactive_titlebar_top;
+                    if (line_start_x < line_end_x) {
+                        for (int offset = 3; offset <= 15; offset += 2) {
+                            draw_line_h_safe(back_buffer, screen_w, screen_h, line_start_x, t_y + offset, line_end_x, line_color);
                         }
                     }
+                    draw_decorations_icon(back_buffer, screen_w, screen_h, curr->x + 6, t_y + (TITLEBAR_HEIGHT - 16) / 2, curr);
+                    uint32_t text_color = curr->focused ? 0xFFFFFFFF : 0xFFC0C0C0;
+                    ui_draw_string_rect(back_buffer, screen_w, screen_h, curr->x + 28, t_y, title_block_w - 34, TITLEBAR_HEIGHT, curr->title, text_color);
+                    int btn_y = t_y + (TITLEBAR_HEIGHT - 14) / 2;
+                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 20, btn_y, 16, 14, 2, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 2)); // Close
+                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 38, btn_y, 16, 14, 1, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 8)); // Maximize
+                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 56, btn_y, 16, 14, 0, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 4)); // Minimize
+                    int cx_left = curr->x - 2;
+                    int cx_top = curr->y - 2;
+                    int cx_w = curr->w + 4;
+                    int cx_h = curr->h + 4;
+                    
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF000000);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF000000);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_left + cx_w - 2, 0xFF000000);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_top + cx_h - 2, 0xFF000000);
+
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top + cx_h - 1, cx_left + cx_w - 1, 0xFFFFFFFF);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 1, cx_top, cx_top + cx_h - 1, 0xFFFFFFFF);
+                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + cx_h - 2, cx_left + cx_w - 2, 0xFFFFFFFF);
+                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 2, cx_top + 1, cx_top + cx_h - 2, 0xFFFFFFFF);
                 }
 
                 // Blend client's mapped shm pixels onto backbuffer
@@ -1602,6 +1902,10 @@ void compositor_composite(void) {
                 if (blend_pixels) {
                     surface_t temp = *curr;
                     temp.pixels = blend_pixels;
+                    if (blend_pixels == resize_preview_pixels) {
+                        temp.buffer_w = temp.w;
+                        temp.buffer_h = temp.h;
+                    }
                     if (partial_render) {
                         int ix = 0, iy = 0, iw = 0, ih = 0;
                         if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
@@ -1711,6 +2015,8 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             surf->client_fd = fd;
             surf->w = p->w;
             surf->h = p->h;
+            surf->buffer_w = p->w;
+            surf->buffer_h = p->h;
             surf->layer = p->layer;
             surf->flags = p->flags;
             surf->state_flags = 0;
@@ -1814,6 +2120,8 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     surf->pixels = surf->pending_pixels;
                     surf->w = surf->pending_w;
                     surf->h = surf->pending_h;
+                    surf->buffer_w = surf->pending_w;
+                    surf->buffer_h = surf->pending_h;
                     surf->shm_size = surf->w * surf->h * 4;
                     strcpy(surf->shm_path, surf->pending_shm_path);
 
@@ -1926,6 +2234,14 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             surface_t *surf = surface_find(p->surface_id);
             if (surf) {
                 copy_string(surf->icon_path, sizeof(surf->icon_path), p->icon_path);
+                surface_load_icon(surf);
+                if (surf->layer == 1 || surf->layer == 2) {
+                    mark_dirty_rect(surf->x - BORDER_WIDTH,
+                                    surf->y - TITLEBAR_HEIGHT - BORDER_WIDTH,
+                                    (int)surf->w + BORDER_WIDTH * 2,
+                                    TITLEBAR_HEIGHT + BORDER_WIDTH);
+                    needs_composite = true;
+                }
                 broadcast_window_event(EVT_WINDOW_TITLE_CHANGED, surf);
             }
             break;
@@ -1945,8 +2261,8 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     munmap(surf->pending_pixels, surf->pending_w * surf->pending_h * 4);
                     unlink(surf->pending_shm_path);
                 }
-                    surf->resize_preview_active = false;
-                    clear_resize_state(surf);
+                surf->resize_preview_active = false;
+                clear_resize_state(surf);
 
                 if (surf->focused) {
                     surf->focused = false;
@@ -1954,6 +2270,11 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     if (fallback && fallback != surf) {
                         set_focus(fallback);
                     }
+                }
+
+                if (surf->icon_pixels) {
+                    free(surf->icon_pixels);
+                    surf->icon_pixels = NULL;
                 }
 
                 surface_remove(surf);
@@ -1991,6 +2312,30 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
 
         case MSG_QUIT: {
             quit_loop = true;
+            break;
+        }
+
+        case MSG_GET_SURFACE_GEOMETRY: {
+            uint32_t target_id = *(uint32_t *)buffer;
+            surface_t *target_surf = surface_find(target_id);
+            struct {
+                uint32_t surface_id;
+                int x, y;
+                uint32_t w, h;
+            } __attribute__((packed)) reply;
+            reply.surface_id = target_id;
+            if (target_surf) {
+                reply.x = target_surf->x;
+                reply.y = target_surf->y;
+                reply.w = target_surf->w;
+                reply.h = target_surf->h;
+            } else {
+                reply.x = 0;
+                reply.y = 0;
+                reply.w = 0;
+                reply.h = 0;
+            }
+            send_frame(fd, MSG_GET_SURFACE_GEOMETRY, target_id, &reply, sizeof(reply));
             break;
         }
 
@@ -2052,7 +2397,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Initialize UI fonts
-    ui_font_init("/Library/Fonts/inter.ttf", 13);
+    ui_font_init("/Library/Fonts/Proggy.ttf", 13);
 
     // Set up signals via self-pipe
     if (sys_pipe(sig_pipe) < 0) {
@@ -2313,10 +2658,19 @@ int main(int argc, char *argv[]) {
                                         }
 
                                         if (click_region == 1) {
-                                            // Start titlebar drag
-                                            hovered->is_dragging = true;
-                                            hovered->drag_offset_x = mx - hovered->x;
-                                            hovered->drag_offset_y = my - hovered->y;
+                                            uint32_t click_time = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
+                                            if (hovered->surface_id == last_titlebar_click_surf_id &&
+                                                click_time - last_titlebar_click_ms < 250) {
+                                                toggle_maximize(hovered);
+                                                last_titlebar_click_surf_id = 0;
+                                            } else {
+                                                last_titlebar_click_surf_id = hovered->surface_id;
+                                                last_titlebar_click_ms = click_time;
+                                                // Start titlebar drag
+                                                hovered->is_dragging = true;
+                                                hovered->drag_offset_x = mx - hovered->x;
+                                                hovered->drag_offset_y = my - hovered->y;
+                                            }
                                         } else if (click_region & (RESIZE_EDGE_LEFT | RESIZE_EDGE_RIGHT | RESIZE_EDGE_TOP | RESIZE_EDGE_BOTTOM)) {
                                             // Start border resize drag
                                             hovered->is_resizing = true;
@@ -2333,24 +2687,10 @@ int main(int argc, char *argv[]) {
                                             hovered->resize_force_next_request = false;
                                             hovered->resize_preview_active = true;
                                             update_resize_drag(hovered, mx, my);
-                                        } else if (click_region == 2) {
-                                            // Close button clicked: EVT_CLOSE_REQUEST
-                                            uint32_t pl = hovered->surface_id;
-                                            send_frame(hovered->client_fd, EVT_CLOSE_REQUEST, hovered->surface_id, &pl, 4);
-                                        } else if (click_region == 4) {
-                                            // Minimize button clicked: unmap surface
-                                            hovered->mapped = false;
-                                            hovered->focused = false;
-                                            hovered->state_flags &= ~1;
-
-                                            // Focus next window
-                                            surface_t *fallback = surface_get_focused();
-                                            if (fallback && fallback != hovered) {
-                                                set_focus(fallback);
-                                            } else {
-                                                set_focus(NULL);
-                                            }
-                                            broadcast_window_event(EVT_STATE_CHANGED, hovered);
+                                        } else if (click_region == 2 || click_region == 4 || click_region == 8) {
+                                            // Start button press tracking
+                                            pressed_button_surface_id = hovered->surface_id;
+                                            pressed_button_region = click_region;
                                             needs_composite = true;
                                         } else if (click_region == 0) {
                                             // Content click: route pointer event
@@ -2409,6 +2749,34 @@ int main(int argc, char *argv[]) {
                                         c->is_dragging = false;
                                         c->is_resizing = false;
                                         c = c->next;
+                                    }
+
+                                    if (pressed_button_surface_id != 0) {
+                                        int rel_region = 0;
+                                        surface_t *rel_surf = surface_at(mx, my, &rel_region);
+                                        if (rel_surf && rel_surf->surface_id == pressed_button_surface_id && rel_region == pressed_button_region) {
+                                            if (pressed_button_region == 2) {
+                                                uint32_t pl = rel_surf->surface_id;
+                                                send_frame(rel_surf->client_fd, EVT_CLOSE_REQUEST, rel_surf->surface_id, &pl, 4);
+                                            } else if (pressed_button_region == 4) {
+                                                rel_surf->mapped = false;
+                                                rel_surf->focused = false;
+                                                rel_surf->state_flags &= ~1;
+                                                surface_t *fallback = surface_get_focused();
+                                                if (fallback && fallback != rel_surf) {
+                                                    set_focus(fallback);
+                                                } else {
+                                                    set_focus(NULL);
+                                                }
+                                                broadcast_window_event(EVT_STATE_CHANGED, rel_surf);
+                                                needs_composite = true;
+                                            } else if (pressed_button_region == 8) {
+                                                toggle_maximize(rel_surf);
+                                            }
+                                        }
+                                        pressed_button_surface_id = 0;
+                                        pressed_button_region = 0;
+                                        needs_composite = true;
                                     }
 
                                     surface_t *target = grabbed;
@@ -2513,6 +2881,11 @@ int main(int argc, char *argv[]) {
                             if (fallback && fallback != curr) {
                                 set_focus(fallback);
                             }
+                        }
+
+                        if (curr->icon_pixels) {
+                            free(curr->icon_pixels);
+                            curr->icon_pixels = NULL;
                         }
 
                         surface_remove(curr);

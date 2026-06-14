@@ -33,14 +33,14 @@ static void on_btn_clicked(NtkWidget *w, void *userdata) {
             ntk_dialog_message(w, "Greeting", msg, NTK_MSG_INFO, NTK_DIALOG_BUTTONS_OK);
             free(text);
         }
-    } 
     } else if (strcmp(action, "click") == 0) {
         ntk_dialog_message(w, "Click", "Button was clicked!", NTK_MSG_INFO, NTK_DIALOG_BUTTONS_OK);
+    }
 }
 
 static void on_canvas_draw(NtkCanvas *canvas, NtkPainter *painter, void *userdata) {
     (void)userdata;
-    NtkRect r = ntk_widget_get_geometry((NtkWidget*)canvas);
+    (void)canvas; 
     ntk_painter_clear(painter, ntk_color_from_rgb(240, 240, 240));
     ntk_painter_set_color(painter, ntk_color_from_rgb(0, 102, 204));
     ntk_painter_fill_rect(painter, NTK_RECT(20, 20, 100, 60));

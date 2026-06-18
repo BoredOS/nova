@@ -2023,11 +2023,12 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             surf->mapped = false;
             surf->resize_last_request_ms = 0;
 
-            // Generate unique shm name containing Client fd and surface ID
-            snprintf(surf->shm_path, sizeof(surf->shm_path), "/dev/shm/nova_surf_fd%d_%u", fd, surf->surface_id);
-
-            // Pre-allocate and map segment inside Nova
-            int shm_fd = open(surf->shm_path, O_RDWR | O_CREAT, 0777);
+            snprintf(surf->shm_path, sizeof(surf->shm_path), "/dev/shm/nova_surf_%d_%d_%u", getpid(), fd, surf->surface_id);
+            int shm_fd = open(surf->shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
+            if (shm_fd < 0) {
+                unlink(surf->shm_path);
+                shm_fd = open(surf->shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
+            }
             if (shm_fd >= 0) {
                 uint32_t sz = p->w * p->h * 4;
                 surf->shm_size = sz;
@@ -2075,9 +2076,13 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (surf) {
                 surf->pending_w = p->w;
                 surf->pending_h = p->h;
-                snprintf(surf->pending_shm_path, sizeof(surf->pending_shm_path), "/dev/shm/nova_surf_fd%d_%u_v2", fd, surf->surface_id);
+                snprintf(surf->pending_shm_path, sizeof(surf->pending_shm_path), "/dev/shm/nova_surf_%d_%d_%u_v2", getpid(), fd, surf->surface_id);
 
-                int shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT, 0777);
+                int shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
+                if (shm_fd < 0) {
+                    unlink(surf->pending_shm_path);
+                    shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
+                }
                 if (shm_fd >= 0) {
                     uint32_t sz = p->w * p->h * 4;
                     surf->pending_pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -2785,6 +2790,15 @@ int main(int argc, char *argv[]) {
                                     }
                                     if (target) {
                                         send_pointer_event(target, 0);
+                                    }
+                                    surface_t *overlay_iter = surface_head;
+                                    while (overlay_iter) {
+                                        if (overlay_iter->mapped && overlay_iter->layer >= 3 && overlay_iter->layer <= 5) {
+                                            if (overlay_iter != target) {
+                                                send_pointer_event(overlay_iter, 0);
+                                            }
+                                        }
+                                        overlay_iter = overlay_iter->next;
                                     }
                                 }
                                 pointer_grab_surface_id = 0;

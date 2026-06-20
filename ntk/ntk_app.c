@@ -292,6 +292,26 @@ static void app_draw_windows(void) {
     }
 }
 
+void ntk_app_draw_windows(void) {
+    if (!g_app) return;
+    for (int i = 0; i < g_app->window_count; i++) {
+        NtkWidget *win = g_app->windows[i];
+        const NtkWidgetClass *klass = ntk_widget_get_class(win);
+        if (klass && klass->layout) klass->layout(win);
+    }
+    app_draw_windows();
+}
+
+static bool is_timer_valid(NtkTimer *timer) {
+    if (!g_app) return false;
+    NtkTimer *curr = g_app->timers;
+    while (curr) {
+        if (curr == timer) return true;
+        curr = curr->next;
+    }
+    return false;
+}
+
 void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
     if (!g_app) return;
 
@@ -309,17 +329,34 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
     while (g_app->running && (done_flag ? !*done_flag : true)) {
         uint32_t now = get_ticks();
         uint32_t timeout = 16;
+        bool timer_fired = false;
 
         NtkTimer *t = g_app->timers;
         while (t) {
+            NtkTimer *next = NULL;
             uint32_t elapsed = now - t->last_fire;
+            bool fired = false;
             if (elapsed >= t->interval) {
                 t->cb(t->id, t->userdata);
-                t->last_fire = now;
+                timer_fired = true;
+                fired = true;
             }
-            uint32_t remaining = t->interval - (now - t->last_fire);
-            if (remaining < timeout) timeout = remaining;
-            t = t->next;
+            if (is_timer_valid(t)) {
+                if (fired) {
+                    t->last_fire = now;
+                }
+                uint32_t elapsed_after = now - t->last_fire;
+                uint32_t remaining = (t->interval > elapsed_after) ? (t->interval - elapsed_after) : 0;
+                if (remaining < timeout) timeout = remaining;
+                next = t->next;
+            } else {
+                break;
+            }
+            t = next;
+        }
+
+        if (timer_fired) {
+            app_draw_windows();
         }
 
         int pr = poll(&pfd, 1, (int)timeout);

@@ -111,6 +111,47 @@ static void scrollbar_paint(NtkWidget *w, NtkPainter *p) {
     ntk_painter_fill_rect(p, btn2);
     if (inst->btn2_pressed) ntk_painter_draw_bevel_sunken(p, btn2, light, dark);
     else ntk_painter_draw_bevel_raised(p, btn2, light, dark);
+
+    // Draw arrow triangles
+    ntk_painter_set_color(p, dark);
+    if (inst->orientation == NTK_VERTICAL) {
+        int cx = r.x + r.width / 2;
+        int cy = r.y + btn_size / 2;
+        int dx = inst->btn1_pressed ? 1 : 0;
+        int dy = inst->btn1_pressed ? 1 : 0;
+        NtkPoint pts[3];
+        pts[0] = NTK_POINT(cx + dx, cy - 3 + dy);
+        pts[1] = NTK_POINT(cx - 4 + dx, cy + 1 + dy);
+        pts[2] = NTK_POINT(cx + 4 + dx, cy + 1 + dy);
+        ntk_painter_fill_polygon(p, pts, 3);
+        cx = r.x + r.width / 2;
+        cy = r.y + r.height - btn_size / 2;
+        dx = inst->btn2_pressed ? 1 : 0;
+        dy = inst->btn2_pressed ? 1 : 0;
+        pts[0] = NTK_POINT(cx + dx, cy + 3 + dy);
+        pts[1] = NTK_POINT(cx - 4 + dx, cy - 1 + dy);
+        pts[2] = NTK_POINT(cx + 4 + dx, cy - 1 + dy);
+        ntk_painter_fill_polygon(p, pts, 3);
+    } else {
+        int cx = r.x + btn_size / 2;
+        int cy = r.y + r.height / 2;
+        int dx = inst->btn1_pressed ? 1 : 0;
+        int dy = inst->btn1_pressed ? 1 : 0;
+        NtkPoint pts[3];
+        pts[0] = NTK_POINT(cx - 3 + dx, cy + dy);
+        pts[1] = NTK_POINT(cx + 1 + dx, cy - 4 + dy);
+        pts[2] = NTK_POINT(cx + 1 + dx, cy + 4 + dy);
+        ntk_painter_fill_polygon(p, pts, 3);
+        cx = r.x + r.width - btn_size / 2;
+        cy = r.y + r.height / 2;
+        dx = inst->btn2_pressed ? 1 : 0;
+        dy = inst->btn2_pressed ? 1 : 0;
+        pts[0] = NTK_POINT(cx + 3 + dx, cy + dy);
+        pts[1] = NTK_POINT(cx - 1 + dx, cy - 4 + dy);
+        pts[2] = NTK_POINT(cx - 1 + dx, cy + 4 + dy);
+        ntk_painter_fill_polygon(p, pts, 3);
+    }
+
     int range = inst->max_val - inst->min_val;
     if (range <= 0) return;
 
@@ -149,10 +190,10 @@ static bool scrollbar_handle_event(NtkWidget *w, NtkEvent *e) {
 
         if (mouse_coord < btn_size) {
             inst->btn1_pressed = true;
-            ntk_scrollbar_set_value(w, inst->value - 1);
+            ntk_scrollbar_set_value(w, inst->value - 16);
         } else if (mouse_coord > max_coord - btn_size) {
             inst->btn2_pressed = true;
-            ntk_scrollbar_set_value(w, inst->value + 1);
+            ntk_scrollbar_set_value(w, inst->value + 16);
         } else {
             int track_len = max_coord - 2 * btn_size;
             int thumb_len = (inst->page_size * track_len) / (range + inst->page_size);

@@ -66,6 +66,96 @@ void ntk_label_set_color(NtkWidget *w, NtkColor color) {
         ntk_widget_repaint(w);
     }
 }
+typedef struct {
+    const char *start;
+    int len;
+} WrappedLine;
+
+static NtkSize measure_substring(NtkFont *font, const char *start, int len) {
+    char *tmp = malloc(len + 1);
+    if (!tmp) return NTK_SIZE(0, 0);
+    memcpy(tmp, start, len);
+    tmp[len] = '\0';
+    NtkSize sz = ntk_font_measure_text(font, tmp);
+    free(tmp);
+    return sz;
+}
+
+static int wrap_text(NtkFont *font, const char *text, int max_width, WrappedLine *lines, int max_lines) {
+    if (!text || max_width <= 20) {
+        lines[0].start = text;
+        lines[0].len = text ? strlen(text) : 0;
+        return 1;
+    }
+
+    int line_count = 0;
+    const char *ptr = text;
+    const char *line_start = text;
+
+    while (*ptr && line_count < max_lines) {
+        if (*ptr == '\n') {
+            lines[line_count].start = line_start;
+            lines[line_count].len = ptr - line_start;
+            line_count++;
+            ptr++;
+            line_start = ptr;
+            continue;
+        }
+
+        if (ptr == line_start && *ptr == ' ') {
+            while (*ptr == ' ' && *ptr != '\n') {
+                ptr++;
+            }
+            line_start = ptr;
+        }
+
+        const char *word_start = ptr;
+        while (*ptr && *ptr != ' ' && *ptr != '\n') {
+            ptr++;
+        }
+        int word_len = ptr - word_start;
+
+        int line_len_with_word = ptr - line_start;
+        NtkSize sz = measure_substring(font, line_start, line_len_with_word);
+
+        if (sz.width > max_width) {
+            if (word_start > line_start) {
+                const char *wrap_end = word_start;
+                if (wrap_end > line_start && *(wrap_end - 1) == ' ') {
+                    wrap_end--;
+                }
+                lines[line_count].start = line_start;
+                lines[line_count].len = wrap_end - line_start;
+                line_count++;
+                line_start = word_start;
+            } else {
+                lines[line_count].start = line_start;
+                lines[line_count].len = word_len;
+                line_count++;
+                line_start = ptr;
+            }
+        }
+
+        if (*ptr == ' ') {
+            ptr++;
+        }
+    }
+
+    if (line_start && *line_start && line_count < max_lines) {
+        lines[line_count].start = line_start;
+        lines[line_count].len = strlen(line_start);
+        line_count++;
+    }
+
+    if (line_count == 0) {
+        lines[0].start = "";
+        lines[0].len = 0;
+        return 1;
+    }
+
+    return line_count;
+}
+
 static void label_paint(NtkWidget *w, NtkPainter *p) {
     NtkLabelInstance *inst = ntk_widget_get_instance_data(w);
     if (!inst->text || strlen(inst->text) == 0) return;
@@ -85,9 +175,45 @@ static void label_paint(NtkWidget *w, NtkPainter *p) {
     ntk_painter_set_color(p, text_col);
 
     NtkPoint origin = ntk_widget_map_to_global(w, NTK_POINT(0, 0));
-    NtkRect r = NTK_RECT(origin.x, origin.y, geom.width, geom.height);
 
-    ntk_painter_draw_text_rect(p, inst->text, r, inst->align);
+    WrappedLine lines[64];
+    int line_count = wrap_text(font, inst->text, geom.width, lines, 64);
+    int line_height = ntk_font_get_line_height(font);
+    int total_text_height = line_count * line_height;
+
+    int start_y = origin.y;
+    if (geom.height > total_text_height) {
+        start_y += (geom.height - total_text_height) / 2;
+    }
+
+    NtkRect saved_clip = ntk_painter_get_clip_rect(p);
+    bool had_clip = ntk_painter_has_clip(p);
+    ntk_painter_set_clip_rect(p, NTK_RECT(origin.x, origin.y, geom.width, geom.height));
+
+    for (int i = 0; i < line_count; i++) {
+        char *line_str = malloc(lines[i].len + 1);
+        if (line_str) {
+            memcpy(line_str, lines[i].start, lines[i].len);
+            line_str[lines[i].len] = '\0';
+
+            NtkSize line_sz = ntk_font_measure_text(font, line_str);
+            int x = origin.x;
+            if (inst->align == NTK_ALIGN_CENTER) {
+                x += (geom.width - line_sz.width) / 2;
+            } else if (inst->align == NTK_ALIGN_END) {
+                x += geom.width - line_sz.width;
+            }
+
+            ntk_painter_draw_text(p, line_str, x, start_y + i * line_height);
+            free(line_str);
+        }
+    }
+
+    if (had_clip) {
+        ntk_painter_set_clip_rect(p, saved_clip);
+    } else {
+        ntk_painter_clear_clip(p);
+    }
 }
 
 static NtkSize label_preferred_size(NtkWidget *w) {
@@ -98,7 +224,40 @@ static NtkSize label_preferred_size(NtkWidget *w) {
     NtkFont *font = ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT);
     if (!font) return NTK_SIZE(10, 10);
 
-    return ntk_font_measure_text(font, inst->text);
+    NtkRect geom = ntk_widget_get_geometry(w);
+    int wrap_width = geom.width;
+
+    if (wrap_width <= 20) {
+        NtkWidget *parent = ntk_widget_get_parent(w);
+        if (parent) {
+            NtkRect parent_geom = ntk_widget_get_geometry(parent);
+            wrap_width = parent_geom.width;
+        }
+    }
+
+    if (wrap_width <= 20) {
+        wrap_width = 400;
+    }
+
+    WrappedLine lines[64];
+    int line_count = wrap_text(font, inst->text, wrap_width, lines, 64);
+    int line_height = ntk_font_get_line_height(font);
+
+    int max_w = 0;
+    for (int i = 0; i < line_count; i++) {
+        char *line_str = malloc(lines[i].len + 1);
+        if (line_str) {
+            memcpy(line_str, lines[i].start, lines[i].len);
+            line_str[lines[i].len] = '\0';
+            NtkSize line_sz = ntk_font_measure_text(font, line_str);
+            if (line_sz.width > max_w) {
+                max_w = line_sz.width;
+            }
+            free(line_str);
+        }
+    }
+
+    return NTK_SIZE(max_w, line_count * line_height);
 }
 
 static void label_destroy(NtkWidget *w) {

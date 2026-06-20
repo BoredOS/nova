@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install Assistant
+Comment=Graphical installer for BoredOS
+Exec=/bin/installer.elf
+Icon=/Library/images/icons/serenityicons/32x32/app-assistant.png
+Terminal=false
+Categories=System;

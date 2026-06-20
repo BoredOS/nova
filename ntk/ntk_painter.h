@@ -18,6 +18,8 @@ void            ntk_painter_set_stroke_width(NtkPainter *p, float width);
 void            ntk_painter_set_font(NtkPainter *p, NtkFont *font);
 void            ntk_painter_set_clip_rect(NtkPainter *p, NtkRect rect);
 void            ntk_painter_clear_clip(NtkPainter *p);
+bool            ntk_painter_has_clip(NtkPainter *p);
+NtkRect         ntk_painter_get_clip_rect(NtkPainter *p);
 void            ntk_painter_set_opacity(NtkPainter *p, float opacity);
 void            ntk_painter_push_transform(NtkPainter *p, NtkTransform *t);
 void            ntk_painter_pop_transform(NtkPainter *p);

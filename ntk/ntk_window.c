@@ -432,6 +432,7 @@ static bool window_handle_event(NtkWidget *w, NtkEvent *e) {
             if (ntk_nova_resize_surface(ntk_app_get_fd(), inst->surface_id, (uint32_t)nw, (uint32_t)nh, new_shm) >= 0) {
                 if (inst->pixels) {
                     munmap(inst->pixels, (size_t)(inst->width * inst->height * 4));
+                    inst->pixels = NULL;
                 }
                 strcpy(inst->shm_path, new_shm);
                 int sfd = open(new_shm, O_RDWR);
@@ -439,6 +440,8 @@ static bool window_handle_event(NtkWidget *w, NtkEvent *e) {
                     inst->pixels = mmap(NULL, (size_t)(nw * nh * 4), PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
                     close(sfd);
                     if (inst->pixels == MAP_FAILED) inst->pixels = NULL;
+                } else {
+                    inst->pixels = NULL;
                 }
                 inst->width = nw;
                 inst->height = nh;

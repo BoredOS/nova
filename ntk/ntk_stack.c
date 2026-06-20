@@ -107,6 +107,11 @@ static void stack_paint(NtkWidget *w, NtkPainter *p) {
 static void stack_layout(NtkWidget *w) {
     NtkStackInstance *inst = ntk_widget_get_instance_data(w);
     NtkRect geom = ntk_widget_get_geometry(w);
+    NtkInsets margin = ntk_widget_get_margin(w);
+    geom.x += margin.left;
+    geom.y += margin.top;
+    geom.width -= (margin.left + margin.right);
+    geom.height -= (margin.top + margin.bottom);
 
     if (inst->current_index >= 0) {
         NtkWidget *page = inst->pages[inst->current_index].page;
@@ -128,6 +133,10 @@ static NtkSize stack_preferred_size(NtkWidget *w) {
         if (pref.width > max_w) max_w = pref.width;
         if (pref.height > max_h) max_h = pref.height;
     }
+
+    NtkInsets margin = ntk_widget_get_margin(w);
+    max_w += margin.left + margin.right;
+    max_h += margin.top + margin.bottom;
 
     return NTK_SIZE(max_w, max_h);
 }

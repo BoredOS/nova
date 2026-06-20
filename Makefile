@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Christiaan (chris@boreddev.nl)
 # Nova Desktop Environment & GUI SDK Makefile
 
+.SECONDARY:
+
 CC = x86_64-elf-gcc
 AR = x86_64-elf-ar
 LD = x86_64-elf-ld
@@ -34,7 +36,7 @@ LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libntk.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf
 
 all: bootstrap-sdk
 	$(MAKE) export-sdk

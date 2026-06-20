@@ -130,6 +130,14 @@ void ntk_painter_clear_clip(NtkPainter *p) {
     if (p) p->has_clip = false;
 }
 
+bool ntk_painter_has_clip(NtkPainter *p) {
+    return p ? p->has_clip : false;
+}
+
+NtkRect ntk_painter_get_clip_rect(NtkPainter *p) {
+    return p ? p->clip : NTK_RECT(0, 0, 0, 0);
+}
+
 void ntk_painter_set_opacity(NtkPainter *p, float opacity) {
     if (!p) return;
     if (opacity < 0.0f) opacity = 0.0f;

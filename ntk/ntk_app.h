@@ -28,5 +28,6 @@ void        ntk_app_unregister_window(NtkWidget *win);
 void        ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag);
 void        ntk_app_set_active_popup(NtkWidget *popup);
 NtkWidget*  ntk_app_get_active_popup(void);
+void        ntk_app_draw_windows(void);
 
 #endif // NTK_APP_H

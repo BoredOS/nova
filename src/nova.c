@@ -2209,6 +2209,19 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             break;
         }
 
+        case MSG_SET_FLAGS: {
+            struct {
+                uint32_t surface_id;
+                uint32_t flags;
+            } __attribute__((packed)) *p = (void *)buffer;
+
+            surface_t *surf = surface_find(p->surface_id);
+            if (surf) {
+                surf->flags = p->flags;
+            }
+            break;
+        }
+
         case MSG_SET_TITLE: {
             struct {
                 uint32_t surface_id;

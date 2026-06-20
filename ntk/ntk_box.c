@@ -121,6 +121,11 @@ static void box_paint(NtkWidget *w, NtkPainter *p) {
 static void box_layout(NtkWidget *w) {
     NtkBoxInstance *inst = ntk_widget_get_instance_data(w);
     NtkRect geom = ntk_widget_get_geometry(w);
+    NtkInsets margin = ntk_widget_get_margin(w);
+    geom.x += margin.left;
+    geom.y += margin.top;
+    geom.width -= (margin.left + margin.right);
+    geom.height -= (margin.top + margin.bottom);
 
     int visible_count = 0;
     int expand_count = 0;
@@ -143,7 +148,6 @@ static void box_layout(NtkWidget *w) {
     int total_space = (inst->orientation == NTK_HORIZONTAL) ? geom.width : geom.height;
     int spacing_total = (visible_count - 1) * inst->spacing;
     int extra_space = total_space - fixed_size - spacing_total;
-    if (extra_space < 0) extra_space = 0;
 
     int homogeneous_size = 0;
     if (inst->homogeneous) {
@@ -173,6 +177,9 @@ static void box_layout(NtkWidget *w) {
                     child_size += extra_space / expand_count;
                 }
             }
+            if (child_size < 0) {
+                child_size = 0;
+            }
 
             if (inst->orientation == NTK_HORIZONTAL) {
                 int cx = 0;
@@ -182,6 +189,9 @@ static void box_layout(NtkWidget *w) {
 
                 if (!c->fill) {
                     cw = pref.width;
+                }
+                if (cw > child_size) {
+                    cw = child_size;
                 }
 
                 if (is_end) {
@@ -202,6 +212,9 @@ static void box_layout(NtkWidget *w) {
 
                 if (!c->fill) {
                     ch = pref.height;
+                }
+                if (ch > child_size) {
+                    ch = child_size;
                 }
 
                 if (is_end) {
@@ -250,6 +263,10 @@ static NtkSize box_preferred_size(NtkWidget *w) {
             total_h += (visible_count - 1) * inst->spacing;
         }
     }
+
+    NtkInsets margin = ntk_widget_get_margin(w);
+    total_w += margin.left + margin.right;
+    total_h += margin.top + margin.bottom;
 
     return NTK_SIZE(total_w, total_h);
 }

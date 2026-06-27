@@ -140,9 +140,9 @@ static void ui_draw_panel(uint32_t *dest, int dest_w, int dest_h, int x, int y, 
 #define MENU_ACTION_ICON_SIZE 16
 #define MENU_ACTION_ICON_SPACING 8
 
-#define DEFAULT_LOGO_PATH "/Library/images/icons/bos.png"
-#define DEFAULT_APP_ICON_PATH "/Library/images/icons/serenityicons/32x32/app-terminal.png"
-#define DESKTOP_APPS_DIR "/usr/share/applications"
+#define DEFAULT_LOGO_PATH "/Library/Icons/boredos/bos.png"
+#define DEFAULT_APP_ICON_PATH "/Library/Icons/serenityicons/32x32/app-terminal.png"
+#define DESKTOP_APPS_DIR "/Library/AppData"
 #define DESKTOP_SUFFIX ".desktop"
 #define DEFAULT_DATE_FORMAT "%Y-%m-%d"
 #define DEFAULT_TIME_FORMAT "%H:%M"
@@ -165,13 +165,13 @@ static const char *categories[NUM_CATEGORIES] = {
 };
 
 static const char *category_icons[NUM_CATEGORIES] = {
-    "/Library/images/icons/serenityicons/16x16/demos.png",
-    "/Library/images/icons/serenityicons/16x16/development.png",
-    "/Library/images/icons/serenityicons/16x16/games.png",
-    "/Library/images/icons/serenityicons/16x16/graphics.png",
-    "/Library/images/icons/serenityicons/16x16/internet.png",
-    "/Library/images/icons/serenityicons/16x16/multimedia.png",
-    "/Library/images/icons/serenityicons/16x16/utilities.png"
+    "/Library/Icons/serenityicons/16x16/demos.png",
+    "/Library/Icons/serenityicons/16x16/development.png",
+    "/Library/Icons/serenityicons/16x16/games.png",
+    "/Library/Icons/serenityicons/16x16/graphics.png",
+    "/Library/Icons/serenityicons/16x16/internet.png",
+    "/Library/Icons/serenityicons/16x16/multimedia.png",
+    "/Library/Icons/serenityicons/16x16/utilities.png"
 };
 
 static image_t category_icon_imgs[NUM_CATEGORIES];
@@ -364,12 +364,6 @@ static void load_taskbar_config(const char *path, taskbar_config_t *cfg) {
     set_default_config(cfg);
 
     FILE *f = fopen(path, "r");
-    if (!f && strcmp(path, "/etc/nova/taskbar.conf") == 0) {
-        f = fopen("/Library/conf/taskbar.conf", "r");
-    }
-    if (!f && strcmp(path, "/Library/conf/taskbar.conf") == 0) {
-        f = fopen("/etc/nova/taskbar.conf", "r");
-    }
     if (!f) return;
 
     char line[256];
@@ -937,13 +931,13 @@ static bool load_desktop_icon(const char *icon, image_t *out) {
 
     const char *ext = str_has_suffix(icon, ".png") ? "" : ".png";
     char path[256];
-    snprintf(path, sizeof(path), "/Library/images/icons/serenityicons/16x16/%s%s", icon, ext);
+    snprintf(path, sizeof(path), "/Library/Icons/serenityicons/16x16/%s%s", icon, ext);
     if (load_scaled_image(path, 16, 16, out)) return true;
 
-    snprintf(path, sizeof(path), "/Library/images/icons/serenityicons/32x32/%s%s", icon, ext);
+    snprintf(path, sizeof(path), "/Library/Icons/serenityicons/32x32/%s%s", icon, ext);
     if (load_scaled_image(path, 16, 16, out)) return true;
 
-    snprintf(path, sizeof(path), "/Library/images/icons/%s%s", icon, ext);
+    snprintf(path, sizeof(path), "/Library/Icons/boredos/%s%s", icon, ext);
     return load_scaled_image(path, 16, 16, out);
 }
 
@@ -964,6 +958,18 @@ static bool add_desktop_application(const char *desktop_file,
                                     const char *category) {
     if (app_count >= MAX_APPS || !exec || !exec[0]) return false;
 
+    char parsed_exec[256];
+    char parsed_args[256];
+    if (!parse_exec_command(exec, parsed_exec, sizeof(parsed_exec), parsed_args, sizeof(parsed_args))) {
+        return false;
+    }
+
+    for (int i = 0; i < app_count; i++) {
+        if (strcmp(apps[i].exec, parsed_exec) == 0 && strcmp(apps[i].args, parsed_args) == 0) {
+            return false;
+        }
+    }
+
     app_entry_t app;
     memset(&app, 0, sizeof(app));
     copy_string(app.desktop_file, sizeof(app.desktop_file), desktop_file);
@@ -973,9 +979,8 @@ static bool add_desktop_application(const char *desktop_file,
         desktop_name_from_file(desktop_file, app.display_name, sizeof(app.display_name));
     }
 
-    if (!parse_exec_command(exec, app.exec, sizeof(app.exec), app.args, sizeof(app.args))) {
-        return false;
-    }
+    copy_string(app.exec, sizeof(app.exec), parsed_exec);
+    copy_string(app.args, sizeof(app.args), parsed_args);
 
     copy_string(app.icon_path, sizeof(app.icon_path), icon);
     app.terminal = terminal;
@@ -988,10 +993,7 @@ static bool add_desktop_application(const char *desktop_file,
     return true;
 }
 
-static bool load_desktop_file(const char *desktop_file) {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", DESKTOP_APPS_DIR, desktop_file);
-
+static bool load_desktop_file(const char *path, const char *desktop_file) {
     FILE *f = fopen(path, "r");
     if (!f) return false;
 
@@ -1087,14 +1089,30 @@ static bool load_desktop_file(const char *desktop_file) {
 static void load_applications(void) {
     clear_applications();
 
-    FAT32_FileInfo entries[128];
-    int count = sys_list(DESKTOP_APPS_DIR, entries, 128);
-    if (count < 0) return;
+    FAT32_FileInfo apps_dirs[128];
+    int dir_count = sys_list("/Library/AppData", apps_dirs, 128);
+    if (dir_count < 0) return;
 
-    for (int i = 0; i < count; i++) {
-        if (entries[i].is_directory) continue;
-        if (!str_has_suffix(entries[i].name, DESKTOP_SUFFIX)) continue;
-        load_desktop_file(entries[i].name);
+    for (int i = 0; i < dir_count; i++) {
+        if (!apps_dirs[i].is_directory) continue;
+        if (strcmp(apps_dirs[i].name, ".") == 0 || strcmp(apps_dirs[i].name, "..") == 0) continue;
+
+        char app_dir_path[256];
+        snprintf(app_dir_path, sizeof(app_dir_path), "/Library/AppData/%s", apps_dirs[i].name);
+
+        FAT32_FileInfo files[32];
+        int file_count = sys_list(app_dir_path, files, 32);
+        if (file_count < 0) continue;
+
+        for (int j = 0; j < file_count; j++) {
+            if (files[j].is_directory) continue;
+            if (!str_has_suffix(files[j].name, DESKTOP_SUFFIX)) continue;
+
+            char desktop_full_path[256];
+            snprintf(desktop_full_path, sizeof(desktop_full_path), "%s/%s", app_dir_path, files[j].name);
+
+            load_desktop_file(desktop_full_path, files[j].name);
+        }
     }
 }
 
@@ -1998,16 +2016,16 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
-    theme_load("/etc/nova/nova.conf", &theme);
+    theme_load("/Library/AppData/org.boredos.nova/nova.conf", &theme);
     ui_font_init(theme.font_path, theme.font_size);
 
-    load_taskbar_config("/etc/nova/taskbar.conf", &config);
+    load_taskbar_config("/Library/AppData/org.boredos.nova/taskbar.conf", &config);
 
     load_scaled_image(config.logo_path, 16, 16, &logo_img);
     load_scaled_image(DEFAULT_APP_ICON_PATH, 16, 16, &app_icon_img);
-    load_scaled_image("/Library/images/icons/bos.png", 16, 16, &boredos_icon_img);
-    load_scaled_image("/Library/images/icons/serenityicons/16x16/app-run.png", 16, 16, &run_icon_img);
-    load_scaled_image("/Library/images/icons/serenityicons/16x16/power.png", 16, 16, &exit_icon_img);
+    load_scaled_image("/Library/Icons/boredos/bos.png", 16, 16, &boredos_icon_img);
+    load_scaled_image("/Library/Icons/serenityicons/16x16/app-run.png", 16, 16, &run_icon_img);
+    load_scaled_image("/Library/Icons/serenityicons/16x16/power.png", 16, 16, &exit_icon_img);
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         load_scaled_image(category_icons[i], 16, 16, &category_icon_imgs[i]);
     }

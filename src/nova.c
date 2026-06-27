@@ -671,12 +671,6 @@ static void configure_autostart_command(autostart_t *item, const char *command) 
 // Nova config INI parser
 void load_nova_config(const char *path) {
     FILE *f = fopen(path, "r");
-    if (!f && strcmp(path, "/etc/nova/nova.conf") == 0) {
-        f = fopen("/Library/conf/nova.conf", "r");
-    }
-    if (!f && strcmp(path, "/Library/conf/nova.conf") == 0) {
-        f = fopen("/etc/nova/nova.conf", "r");
-    }
     if (!f) return;
 
     autostart_count = 0;
@@ -2367,7 +2361,7 @@ int main(int argc, char *argv[]) {
     (void)argv;
 
     // Load compositor settings
-    load_nova_config("/etc/nova/nova.conf");
+    load_nova_config("/Library/AppData/org.boredos.nova/nova.conf");
 
     // Open Linear Framebuffer device
     fb_fd = open("/dev/fb0", O_RDWR);
@@ -2841,7 +2835,7 @@ int main(int argc, char *argv[]) {
                             }
                         } else if (sig == SIGUSR1) {
                             // Reload settings
-                            load_nova_config("/etc/nova/nova.conf");
+                            load_nova_config("/Library/AppData/org.boredos.nova/nova.conf");
                             needs_composite = true;
                         }
                     }

@@ -120,7 +120,7 @@ void ntk_dialog_warning(NtkWidget *parent, const char *title, const char *messag
 char* ntk_dialog_get_text(NtkWidget *parent, const char *title, const char *label, const char *initial_value) {
     NtkWidget *win = ntk_window_new_dialog(parent, title, 320, 115);
     if (title && strcmp(title, "Run") == 0) {
-        ntk_window_set_icon_path(win, "/Library/images/icons/serenityicons/16x16/app-run.png");
+        ntk_window_set_icon_path(win, "/Library/Icons/serenityicons/16x16/app-run.png");
     }
     NtkWidget *vbox = ntk_box_new(NTK_VERTICAL, win);
     ntk_box_set_spacing(vbox, 10);

@@ -32,4 +32,4 @@ To stage the compiled executables and configurations into your target initrd roo
 make DESTDIR=/path/to/initrd/root install
 ```
 - Binaries (`*.elf`) are routed to `/bin/`
-- Styling configurations (`*.conf`) are routed to `/Library/conf/` and `/etc/nova/`
+- Styling configurations (`*.conf`) and launchers are routed to `/Library/AppData/`

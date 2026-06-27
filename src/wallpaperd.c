@@ -15,7 +15,7 @@
 #include <sys/mman.h>
 #include <syscall.h>
 
-#define DEFAULT_WALLPAPER "/Library/images/Wallpapers/boredos.png"
+#define DEFAULT_WALLPAPER "/Library/Wallpapers/Curvature.png"
 
 static void copy_string(char *dst, size_t dst_size, const char *src) {
     if (!dst || dst_size == 0) return;
@@ -41,12 +41,6 @@ static void load_wallpaper_path(const char *path, char *out_path, size_t max_len
     copy_string(out_path, max_len, DEFAULT_WALLPAPER);
 
     FILE *f = fopen(path, "r");
-    if (!f && strcmp(path, "/etc/nova/wallpaper.conf") == 0) {
-        f = fopen("/Library/conf/wallpaper.conf", "r");
-    }
-    if (!f && strcmp(path, "/Library/conf/wallpaper.conf") == 0) {
-        f = fopen("/etc/nova/wallpaper.conf", "r");
-    }
     if (!f) return;
 
     char line[256];
@@ -87,10 +81,7 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
-    NtkStyle *style = ntk_style_new_from_file("/etc/nova/nova.conf");
-    if (!style) {
-        style = ntk_style_new_from_file("/Library/conf/nova.conf");
-    }
+    NtkStyle *style = ntk_style_new_from_file("/Library/AppData/org.boredos.nova/nova.conf");
     NtkColor desktop_bg = 0xFF3C3C3C;
     if (style) {
         desktop_bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG);
@@ -98,7 +89,7 @@ int main(int argc, char *argv[]) {
     }
 
     char wallpaper_path[256];
-    load_wallpaper_path("/etc/nova/wallpaper.conf", wallpaper_path, sizeof(wallpaper_path));
+    load_wallpaper_path("/Library/AppData/org.boredos.nova/wallpaper.conf", wallpaper_path, sizeof(wallpaper_path));
 
     int fd = ntk_nova_connect(NULL);
     if (fd < 0) {

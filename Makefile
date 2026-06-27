@@ -96,17 +96,15 @@ obj/%.o: src/%.c
 install: all
 	mkdir -p $(DESTDIR)/bin
 	cp $(APPS) $(DESTDIR)/bin/
-	mkdir -p $(DESTDIR)/Library/conf
-	cp assets/taskbar.conf assets/wallpaper.conf $(DESTDIR)/Library/conf/
-	mkdir -p $(DESTDIR)/etc/nova
-	cp assets/nova.conf $(DESTDIR)/etc/nova/
+	mkdir -p $(DESTDIR)/Library/AppData/org.boredos.nova
+	cp assets/taskbar.conf assets/wallpaper.conf assets/nova.conf $(DESTDIR)/Library/AppData/org.boredos.nova/
 	@if [ -d pack/assets ]; then \
 		mkdir -p $(DESTDIR)/Library; \
 		cp -a pack/assets/* $(DESTDIR)/Library/; \
 	fi
 	@if [ -d pack/apps ]; then \
-		mkdir -p $(DESTDIR)/usr/share/applications; \
-		cp -a pack/apps/*.desktop $(DESTDIR)/usr/share/applications/; \
+		mkdir -p $(DESTDIR)/Library/AppData/org.boredos.nova; \
+		cp pack/apps/*.desktop $(DESTDIR)/Library/AppData/org.boredos.nova/; \
 	fi
 
 .PHONY: deps bup

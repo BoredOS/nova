@@ -470,11 +470,6 @@ static void run_installation_sync(void) {
         sys_mkdir("/mnt/boot");
     }
     
-    if (sys_mkdir("/mnt/Library") == 0 || sys_exists("/mnt/Library")) {
-        int mfd = sys_open("/mnt/Library/.boredos_root", "w");
-        if (mfd >= 0) sys_close(mfd);
-    }
-
     set_progress(0.30f, "Copying system binaries (/bin)...");
     if (copy_tree("/bin", "/mnt/bin") != 0) {
         ntk_dialog_error(g_win, "Installation Error", "Failed to copy system binaries.");
@@ -497,9 +492,6 @@ static void run_installation_sync(void) {
         ntk_dialog_error(g_win, "Installation Error", "Failed to copy kernel.");
         goto error;
     }
-    copy_file_optional("/README.md", "/mnt/README.md");
-    copy_file_optional("/LICENSE", "/mnt/LICENSE");
-    copy_file_optional("/about.c", "/mnt/about.c");
 
     g_pkg_install_index = 0;
     g_pkg_total_checked = 0;
@@ -704,7 +696,7 @@ int main(void) {
         ntk_app_destroy(g_app);
         return 1;
     }
-    ntk_window_set_icon_path(g_win, "/Library/images/icons/serenityicons/16x16/app-assistant.png");
+    ntk_window_set_icon_path(g_win, "/Library/Icons/serenityicons/16x16/app-assistant.png");
     ntk_window_set_resizable(g_win, false);
     
     NtkWidget *hbox_main = ntk_box_new(NTK_HORIZONTAL, g_win);

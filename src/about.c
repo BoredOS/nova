@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BRANDING_PATH "/Library/images/branding/bOS_full_gradient_cropped.png"
+#define BRANDING_PATH "/Library/Images/branding/bOS_full_gradient_cropped.png"
 
 typedef struct {
     char os_name[128];

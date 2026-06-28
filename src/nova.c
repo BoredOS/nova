@@ -891,7 +891,7 @@ static bool send_key_event(surface_t *surf,
 }
 
 static uint32_t get_ticks_ms(void) {
-    return (uint32_t)sys_system(16 /* SYSTEM_CMD_GET_TICKS */, 0, 0, 0, 0);
+    return (uint32_t)get_ticks();
 }
 
 
@@ -1452,7 +1452,7 @@ void spawn_autostart(int idx) {
 }
 
 void trigger_autostart_respawn(int pid) {
-    uint32_t now = (uint32_t)sys_system(16 /* SYSTEM_CMD_GET_TICKS */, 0, 0, 0, 0);
+    uint32_t now = (uint32_t)get_ticks();
     for (int i = 0; i < autostart_count; i++) {
         if (autostarts[i].pid == pid) {
             autostarts[i].pid = 0;
@@ -2561,7 +2561,7 @@ int main(int argc, char *argv[]) {
         int pr = poll(poll_fds, fd_idx, 16);
 
         // Process Autostart respawn timers
-        uint32_t now = (uint32_t)sys_system(16 /* SYSTEM_CMD_GET_TICKS */, 0, 0, 0, 0);
+        uint32_t now = (uint32_t)get_ticks();
         for (int i = 0; i < autostart_count; i++) {
             if (autostarts[i].respawn_at_ms != 0 && now >= autostarts[i].respawn_at_ms) {
                 spawn_autostart(i);
@@ -2670,7 +2670,7 @@ int main(int argc, char *argv[]) {
                                         }
 
                                         if (click_region == 1) {
-                                            uint32_t click_time = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
+                                            uint32_t click_time = get_ticks() * 16;
                                             if (hovered->surface_id == last_titlebar_click_surf_id &&
                                                 click_time - last_titlebar_click_ms < 250) {
                                                 toggle_maximize(hovered);

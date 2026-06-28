@@ -667,7 +667,7 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
 
 static bool read_rtc(int dt[6]) {
     if (!dt) return false;
-    if (sys_system(SYSTEM_CMD_RTC_GET, (uint64_t)dt, 0, 0, 0) != 0) {
+    if (rtc_get(dt) != 0) {
         return false;
     }
     return true;
@@ -2092,7 +2092,7 @@ int main(int argc, char *argv[]) {
         }
         int pr = poll(&pfd, 1, timeout);
 
-        uint32_t now = sys_system(SYSTEM_CMD_GET_TICKS, 0, 0, 0, 0) * 16;
+        uint32_t now = get_ticks() * 16;
         if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
             bar_dirty = true;

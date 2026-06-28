@@ -665,7 +665,7 @@ static void on_btn_next_clicked(NtkWidget *w, void *userdata) {
         run_installation_sync();
         return;
     } else if (g_current_page_idx == 7) {
-        sys_system(12 /* SYSTEM_CMD_REBOOT */, 0, 0, 0, 0);
+        sys_reboot();
         ntk_app_quit(g_app);
         return;
     }

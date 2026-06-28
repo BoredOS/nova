@@ -61,7 +61,7 @@ void ntk_app_notify_widget_destroyed(NtkWidget *w) {
 }
 
 // Helper to get ticks in milliseconds
-static uint32_t get_ticks(void) {
+static uint32_t ntk_get_ticks(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint32_t)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
@@ -161,7 +161,7 @@ uint32_t ntk_app_set_timer(uint32_t interval_ms, NtkTimerCallback cb, void *user
 
     t->id = g_app->next_timer_id++;
     t->interval = interval_ms;
-    t->last_fire = get_ticks();
+    t->last_fire = ntk_get_ticks();
     t->cb = cb;
     t->userdata = userdata;
     t->next = g_app->timers;
@@ -327,7 +327,7 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
     pfd.events = POLLIN;
 
     while (g_app->running && (done_flag ? !*done_flag : true)) {
-        uint32_t now = get_ticks();
+        uint32_t now = ntk_get_ticks();
         uint32_t timeout = 16;
         bool timer_fired = false;
 

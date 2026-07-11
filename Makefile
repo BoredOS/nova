@@ -3,9 +3,9 @@
 
 .SECONDARY:
 
-CC = x86_64-elf-gcc
-AR = x86_64-elf-ar
-LD = x86_64-elf-ld
+CC = x86_64-boredos-gcc
+AR = x86_64-boredos-ar
+LD = x86_64-boredos-ld
 
 # Smart SDK Resolution Logic
 ifneq ($(BOREDOS_SDK),)
@@ -122,7 +122,7 @@ bup: all
 	mkdir -p build; OUT=build/$$BUPNAME; \
 	SRCDIRS="MANIFEST.toml bin config assets usr"; \
 	if [ -d build/package/scripts ]; then SRCDIRS="$$SRCDIRS scripts"; fi; \
-	x86_64-elf-strip --strip-unneeded build/package/bin/*.elf 2>/dev/null || true; \
+	x86_64-boredos-strip --strip-unneeded build/package/bin/*.elf 2>/dev/null || true; \
 	tar -cf build/nova.tar -C build/package $$SRCDIRS; \
 	lz4 -f build/nova.tar build/nova.bup; \
 	cp build/nova.bup $$OUT; \

@@ -29,7 +29,7 @@ DESTDIR ?= $(abspath build/dist)
 
 CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -m64 -march=x86-64 -mno-red-zone \
-          -isystem $(SDK_PATH)/include -Ilibnovaproto -Intk -I.
+          -isystem $(SDK_PATH)/include -Ilibnovaproto -Intk -I. -Isrc
 
 LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
           --no-dynamic-linker -z text -z max-page-size=0x1000 -e _start \
@@ -38,28 +38,9 @@ LDFLAGS = -m elf_x86_64 -nostdlib -static -no-pie -Ttext=0x40000000 \
 LIBS = obj/libnovaproto.a obj/libntk.a
 APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf
 
-all: bootstrap-sdk
+all: $(LIBS)
 	$(MAKE) export-sdk
 	$(MAKE) $(APPS)
-
-# Autonomic SDK Bootstrapper
-.PHONY: bootstrap-sdk
-bootstrap-sdk:
-ifdef BOOTSTRAP_SDK
-	@if [ ! -f "$(BOOTSTRAP_SDK)/lib/libc.a" ]; then \
-		if [ -d "../libc" ]; then \
-			echo "[STANDALONE] Peer libc found at ../libc. Building standard SDK..."; \
-			$(MAKE) -C ../libc SDK_DIR=$(BOOTSTRAP_SDK) install; \
-		else \
-			echo "[STANDALONE] SDK and peer libc not found. Fetching libc from GitHub..."; \
-			mkdir -p build; \
-			if [ ! -d "build/libc_src" ]; then \
-				git clone https://github.com/boredos/libc.git build/libc_src; \
-			fi; \
-			$(MAKE) -C build/libc_src SDK_DIR=$(BOOTSTRAP_SDK) install; \
-		fi \
-	fi
-endif
 
 # Compile GUI static libraries
 obj/libnovaproto.o: libnovaproto/novaproto.c
@@ -67,9 +48,17 @@ obj/libnovaproto.o: libnovaproto/novaproto.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 NTK_SRC = $(wildcard ntk/*.c)
-NTK_OBJ = $(patsubst ntk/%.c,obj/ntk_%.o,$(NTK_SRC))
+NTK_OBJ = $(patsubst ntk/%.c,obj/ntk_%.o,$(NTK_SRC)) obj/stb_image.o obj/utf-8.o
 
 obj/ntk_%.o: ntk/%.c
+	@mkdir -p obj
+	$(CC) $(CFLAGS) -c $< -o $@
+
+obj/stb_image.o: src/stb_image.c
+	@mkdir -p obj
+	$(CC) $(CFLAGS) -c $< -o $@
+
+obj/utf-8.o: src/utf-8.c
 	@mkdir -p obj
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -82,7 +71,7 @@ obj/libnovaproto.a: obj/libnovaproto.o
 # Export GUI SDK components into the resolved SDK path
 export-sdk: $(LIBS)
 	mkdir -p $(SDK_PATH)/include $(SDK_PATH)/lib
-	cp libnovaproto/*.h ntk/*.h $(SDK_PATH)/include/
+	cp libnovaproto/*.h ntk/*.h src/utf-8.h src/stb_image.h src/stb_image_write.h $(SDK_PATH)/include/
 	cp $(LIBS) $(SDK_PATH)/lib/
 
 # Compile Desktop Application binaries
@@ -91,7 +80,7 @@ obj/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 %.elf: obj/%.o $(LIBS)
-	$(LD) $(LDFLAGS) $(SDK_PATH)/lib/crt0.o $< -lntk -lnovaproto -lc -o $@
+	$(LD) $(LDFLAGS) $(SDK_PATH)/lib/crt0.o $(SDK_PATH)/lib/crti.o $< -lntk -lnovaproto -lc $(SDK_PATH)/lib/crtn.o -o $@
 
 install: all
 	mkdir -p $(DESTDIR)/bin
@@ -133,6 +122,7 @@ bup: all
 	mkdir -p build; OUT=build/$$BUPNAME; \
 	SRCDIRS="MANIFEST.toml bin config assets usr"; \
 	if [ -d build/package/scripts ]; then SRCDIRS="$$SRCDIRS scripts"; fi; \
+	x86_64-elf-strip --strip-unneeded build/package/bin/*.elf 2>/dev/null || true; \
 	tar -cf build/nova.tar -C build/package $$SRCDIRS; \
 	lz4 -f build/nova.tar build/nova.bup; \
 	cp build/nova.bup $$OUT; \

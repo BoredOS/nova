@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <poll.h>
 typedef struct { int x, y; } NtkPoint;
 typedef struct { int width, height; } NtkSize;
 typedef struct { int x, y, width, height; } NtkRect;

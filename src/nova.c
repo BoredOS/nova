@@ -1937,11 +1937,13 @@ void compositor_composite(void) {
     // 3. Blit backbuffer directly to hardware framebuffer mapped address space
     if (has_dirty_rect) {
         copy_box_to_fb(dirty_x, dirty_y, dirty_w, dirty_h);
+        present_framebuffer(dirty_x, dirty_y, dirty_w, dirty_h);
         has_dirty_rect = false; // Reset
     } else {
         for (int y = 0; y < screen_h; y++) {
             memcpy((uint8_t*)fb_mem + (uint64_t)y * finfo.line_length, &back_buffer[y * screen_w], screen_w * 4);
         }
+        present_framebuffer(0, 0, screen_w, screen_h);
     }
 
     // 4. Restore the clean pixels back to back_buffer

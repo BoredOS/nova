@@ -84,6 +84,13 @@ int ntk_nova_poll_event(int fd, NtkEvent *event_out) {
             event_out->global_pos = event_out->mouse_pos;
             event_out->mouse_buttons = ne.data.pointer.buttons;
             break;
+        case EVT_SCROLL:
+            event_out->type = NTK_EVENT_SCROLL;
+            event_out->mouse_pos = NTK_POINT(ne.data.scroll.x, ne.data.scroll.y);
+            event_out->global_pos = event_out->mouse_pos;
+            event_out->scroll_dx = ne.data.scroll.dx;
+            event_out->scroll_dy = ne.data.scroll.dy;
+            break;
         case EVT_RESIZE_REQUEST:
             event_out->type = NTK_EVENT_RESIZE;
             event_out->width = ne.data.resize.w;

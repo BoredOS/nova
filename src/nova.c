@@ -854,6 +854,24 @@ static bool send_pointer_event(surface_t *surf, uint32_t buttons) {
     return send_frame(surf->client_fd, EVT_POINTER, surf->surface_id, &pl, sizeof(pl)) == 0;
 }
 
+static bool send_scroll_event(surface_t *surf, int dx, int dy) {
+    if (!surf || !surf->mapped) return false;
+
+    struct {
+        uint32_t surface_id;
+        int x, y;
+        int dx, dy;
+    } __attribute__((packed)) pl = {
+        surf->surface_id,
+        mx - surf->x,
+        my - surf->y,
+        dx,
+        dy
+    };
+
+    return send_frame(surf->client_fd, EVT_SCROLL, surf->surface_id, &pl, sizeof(pl)) == 0;
+}
+
 static bool send_key_event(surface_t *surf,
                            NovaKeycode key,
                            uint32_t modifiers,
@@ -2638,6 +2656,10 @@ int main(int argc, char *argv[]) {
                             uint8_t flags = mouse_buf[0];
                             int dx = (int8_t)mouse_buf[1];
                             int dy = (int8_t)mouse_buf[2];
+                            int8_t wheel = mouse_buf[3] & 0x0F;
+                            if (wheel & 0x08) {
+                                wheel |= 0xF0;
+                            }
 
                             mx += dx;
                             my -= dy; // Invert PS/2 Y coords
@@ -2811,6 +2833,12 @@ int main(int argc, char *argv[]) {
                                     }
                                 }
                                 pointer_grab_surface_id = 0;
+                            }
+
+                            if (wheel != 0) {
+                                if (hovered && click_region == 0) {
+                                    send_scroll_event(hovered, 0, wheel * 3);
+                                }
                             }
 
                             if ((dx != 0 || dy != 0) && !fast_drag_handled) {

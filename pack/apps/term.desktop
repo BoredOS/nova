@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=BoredOS Nova Terminal Emulator
+Exec=/bin/term.elf
+Icon=/Library/Icons/serenityicons/32x32/app-terminal.png
+Terminal=false
+Categories=System;Utility;

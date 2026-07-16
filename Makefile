@@ -11,7 +11,7 @@ SDK_PATH = $(BOREDOS_SDK)
 
 DESTDIR ?= $(abspath build/dist)
 
-CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -fno-stack-protector \
+CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -g -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -m64 -march=x86-64 -mno-red-zone \
           -I$(SDK_PATH)/include -Ilibnovaproto -Intk -I. -Isrc
 
@@ -20,7 +20,7 @@ LDFLAGS = -static -no-pie -Wl,-Ttext=0x40000000 \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libntk.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf
 
 all: $(LIBS)
 	$(MAKE) export-sdk
@@ -70,7 +70,7 @@ install: all
 	mkdir -p $(DESTDIR)/bin
 	cp $(APPS) $(DESTDIR)/bin/
 	mkdir -p $(DESTDIR)/Library/AppData/org.boredos.nova
-	cp assets/taskbar.conf assets/wallpaper.conf assets/nova.conf $(DESTDIR)/Library/AppData/org.boredos.nova/
+	cp assets/taskbar.conf assets/wallpaper.conf assets/nova.conf assets/term.conf $(DESTDIR)/Library/AppData/org.boredos.nova/
 	@if [ -d pack/assets ]; then \
 		mkdir -p $(DESTDIR)/Library; \
 		cp -a pack/assets/* $(DESTDIR)/Library/; \

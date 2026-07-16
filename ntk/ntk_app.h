@@ -29,5 +29,6 @@ void        ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag);
 void        ntk_app_set_active_popup(NtkWidget *popup);
 NtkWidget*  ntk_app_get_active_popup(void);
 void        ntk_app_draw_windows(void);
+void        ntk_app_set_custom_poll_fd(int fd, void (*cb)(int, void*), void *data);
 
 #endif // NTK_APP_H

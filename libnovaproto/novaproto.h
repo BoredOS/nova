@@ -41,6 +41,7 @@
 #define EVT_WINDOW_DESTROYED    110
 #define EVT_WINDOW_TITLE_CHANGED 111
 #define EVT_WINDOW_LIST_END     112
+#define EVT_SCROLL              113
 
 // Nova Virtual Keycode Enum
 typedef enum {
@@ -77,6 +78,7 @@ typedef struct {
         struct { uint32_t w, h; } resize;
         struct { uint32_t state_flags; } state;
         struct { char title[128]; uint32_t state_flags; char icon_path[256]; } window;
+        struct { int x, y; int dx, dy; } scroll;
     } data;
 } NovaEvent;
 

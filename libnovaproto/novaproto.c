@@ -210,6 +210,19 @@ static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, uin
             event_out->data.state.state_flags = p->state_flags;
             break;
         }
+        case EVT_SCROLL: {
+            struct {
+                uint32_t surface_id;
+                int x, y;
+                int dx, dy;
+            } __attribute__((packed)) *p = (void *)buffer;
+            event_out->surface_id = p->surface_id;
+            event_out->data.scroll.x = p->x;
+            event_out->data.scroll.y = p->y;
+            event_out->data.scroll.dx = p->dx;
+            event_out->data.scroll.dy = p->dy;
+            break;
+        }
         case EVT_THEME_UPDATE: {
             // Re-broadcast theme update inside process
             break;

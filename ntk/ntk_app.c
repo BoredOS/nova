@@ -34,6 +34,9 @@ struct NtkApp {
     uint32_t    next_timer_id;
     bool        running;
     char       *clipboard;
+    int         custom_fd;
+    void      (*custom_fd_cb)(int fd, void *data);
+    void       *custom_fd_data;
 };
 
 // Global application instance
@@ -81,6 +84,7 @@ NtkApp* ntk_app_new(void) {
 
     app->running = true;
     app->next_timer_id = 1;
+    app->custom_fd = -1;
     g_app = app;
 
     // Load default global style
@@ -322,9 +326,9 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
     }
     app_draw_windows();
 
-    struct pollfd pfd;
-    pfd.fd     = g_app->fd;
-    pfd.events = POLLIN;
+    struct pollfd pfds[2];
+    pfds[0].fd     = g_app->fd;
+    pfds[0].events = POLLIN;
 
     while (g_app->running && (done_flag ? !*done_flag : true)) {
         uint32_t now = ntk_get_ticks();
@@ -359,15 +363,28 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
             app_draw_windows();
         }
 
-        int pr = poll(&pfd, 1, (int)timeout);
+        int nfds = 1;
+        if (g_app->custom_fd >= 0) {
+            pfds[1].fd = g_app->custom_fd;
+            pfds[1].events = POLLIN;
+            nfds = 2;
+        }
+
+        int pr = poll(pfds, nfds, (int)timeout);
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
 
-        if ((pr > 0 && (pfd.revents & POLLIN)) || ntk_nova_pending_events()) {
+        if (pr > 0 && nfds > 1 && (pfds[1].revents & POLLIN)) {
+            if (g_app->custom_fd_cb) {
+                g_app->custom_fd_cb(g_app->custom_fd, g_app->custom_fd_data);
+            }
+        }
+
+        if ((pr > 0 && (pfds[0].revents & POLLIN)) || ntk_nova_pending_events()) {
             NtkEvent ev;
-            while (ntk_nova_pending_events() || (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))) {
+            while (ntk_nova_pending_events() || (poll(pfds, 1, 0) > 0 && (pfds[0].revents & POLLIN))) {
                 if (ntk_nova_poll_event(g_app->fd, &ev) < 0) {
                     g_app->running = false;
                     break;
@@ -470,6 +487,12 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
                     g_last_buttons = buttons;
 
                     propagate_event(target, &ev);
+                } else if (ev.type == NTK_EVENT_SCROLL) {
+                    NtkPoint pt = ev.mouse_pos;
+                    ev.global_pos = pt;
+                    NtkWidget *target = find_window_child_at(win, pt);
+                    if (!target) target = win;
+                    propagate_event(target, &ev);
                 } else if (ev.type == NTK_EVENT_KEY_PRESS || ev.type == NTK_EVENT_KEY_RELEASE) {
                     NtkWidget *focused = find_focused_widget(win);
                     if (!focused) focused = win;
@@ -489,4 +512,12 @@ int ntk_app_run(NtkApp *app) {
     if (!app) return 1;
     ntk_app_run_modal(NULL, NULL);
     return 0;
+}
+
+void ntk_app_set_custom_poll_fd(int fd, void (*cb)(int, void*), void *data) {
+    if (g_app) {
+        g_app->custom_fd = fd;
+        g_app->custom_fd_cb = cb;
+        g_app->custom_fd_data = data;
+    }
 }

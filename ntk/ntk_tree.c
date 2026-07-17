@@ -4,259 +4,323 @@
 
 #include "ntk_tree.h"
 #include "ntk_style.h"
+
 #include <stdlib.h>
 #include <string.h>
 
-#define NTK_TREE_MAX_CHILDREN 16
-#define NTK_TREE_ROW_H        16
+#define NTK_TREE_ROW_HEIGHT 20
+#define NTK_TREE_INDENT 16
 
 struct NtkTreeNode {
-    char        *text;
-    bool         expanded;
+    char *text;
+    bool expanded;
+    bool may_have_children;
+    void *user_data;
+    NtkPixmap *icon;
     NtkTreeNode *parent;
-    NtkTreeNode *children[NTK_TREE_MAX_CHILDREN];
-    int          child_count;
+    NtkTreeNode **children;
+    int child_count;
+    int child_capacity;
 };
 
 typedef struct {
-    NtkTreeNode  root;
+    NtkTreeNode root;
     NtkTreeNode *selected_node;
 } NtkTreeViewInstance;
-static void tree_paint(NtkWidget *w, NtkPainter *p);
-static bool tree_handle_event(NtkWidget *w, NtkEvent *e);
-static NtkSize tree_preferred_size(NtkWidget *w);
-static void tree_destroy(NtkWidget *w);
+
+static void tree_paint(NtkWidget *widget, NtkPainter *painter);
+static bool tree_handle_event(NtkWidget *widget, NtkEvent *event);
+static NtkSize tree_preferred_size(NtkWidget *widget);
+static void tree_destroy(NtkWidget *widget);
 
 static const NtkWidgetClass tree_class = {
-    .type_name      = "NtkTreeView",
-    .paint          = tree_paint,
-    .layout         = NULL,
+    .type_name = "NtkTreeView",
+    .paint = tree_paint,
+    .layout = NULL,
     .preferred_size = tree_preferred_size,
-    .handle_event   = tree_handle_event,
-    .destroy        = tree_destroy
+    .handle_event = tree_handle_event,
+    .destroy = tree_destroy,
 };
 
-NtkWidget* ntk_tree_view_new(NtkWidget *parent) {
-    NtkWidget *w = ntk_widget_new_with_class(parent, &tree_class, sizeof(NtkTreeViewInstance));
-    if (!w) return NULL;
-
-    NtkTreeViewInstance *inst = ntk_widget_get_instance_data(w);
-    inst->root.text = strdup("Root");
-    inst->root.expanded = true;
-    inst->root.parent = NULL;
-    inst->root.child_count = 0;
-    inst->selected_node = NULL;
-
-    return w;
-}
-
-NtkTreeNode* ntk_tree_view_get_root(NtkWidget *tv) {
-    NtkTreeViewInstance *inst = ntk_widget_get_instance_data(tv);
-    return inst ? &inst->root : NULL;
-}
-
-NtkTreeNode* ntk_tree_node_add_child(NtkTreeNode *parent, const char *text) {
-    if (!parent || parent->child_count >= NTK_TREE_MAX_CHILDREN) return NULL;
-
-    NtkTreeNode *child = calloc(1, sizeof(NtkTreeNode));
-    if (!child) return NULL;
-
-    child->text = text ? strdup(text) : strdup("");
-    child->expanded = false;
-    child->parent = parent;
-    child->child_count = 0;
-
-    parent->children[parent->child_count++] = child;
-
-    return child;
-}
-
-void ntk_tree_node_set_text(NtkTreeNode *node, const char *text) {
-    if (node) {
-        free(node->text);
-        node->text = text ? strdup(text) : strdup("");
-    }
-}
-
-const char* ntk_tree_node_get_text(NtkTreeNode *node) {
-    return node ? node->text : "";
-}
-
-void ntk_tree_node_set_expanded(NtkTreeNode *node, bool expanded) {
-    if (node) {
-        node->expanded = expanded;
-    }
-}
-
-bool ntk_tree_node_is_expanded(NtkTreeNode *node) {
-    return node ? node->expanded : false;
-}
-static void free_node(NtkTreeNode *node) {
+static void tree_node_destroy(NtkTreeNode *node) {
     if (!node) return;
-    free(node->text);
-    for (int i = 0; i < node->child_count; i++) {
-        free_node(node->children[i]);
+
+    for (int i = 0; i < node->child_count; ++i) {
+        tree_node_destroy(node->children[i]);
     }
+
+    free(node->children);
+    free(node->text);
+    if (node->icon) ntk_pixmap_destroy(node->icon);
+    if (node->parent) free(node);
 }
 
-static bool is_last_child(NtkTreeNode *n) {
-    if (!n || !n->parent) return true;
-    return n->parent->children[n->parent->child_count - 1] == n;
+static int tree_visible_node_count(const NtkTreeNode *node) {
+    int count = node->parent ? 1 : 0;
+    if (node->expanded) {
+        for (int i = 0; i < node->child_count; ++i) {
+            count += tree_visible_node_count(node->children[i]);
+        }
+    }
+    return count;
 }
 
-static int traverse_nodes(NtkPainter *p, NtkTreeNode *node, NtkFont *font, NtkStyle *style, NtkColor text_col,
-                          NtkColor light, NtkColor dark, int x, int y, int width, int indent,
-                          NtkTreeNode *selected, int mouse_y, NtkTreeNode **hit_node, bool *toggle_clicked, int mouse_x) {
-    if (!node) return y;
-    bool is_root = (node->parent == NULL);
-    if (!is_root) {
-        int row_y = y;
-        NtkRect toggle_r = NTK_RECT(x + 12 + indent, row_y + 2, 12, 12);
-        
-        if (p) {
-            int level = indent / 16;
-            NtkTreeNode *ancestors[32];
-            int anc_count = 0;
-            NtkTreeNode *curr = node;
-            while (curr && curr->parent) {
-                if (anc_count < 32) {
-                    ancestors[anc_count++] = curr;
-                }
-                curr = curr->parent;
-            }
-            
-            for (int j = 0; j <= level; j++) {
-                int col_x = x + 12 + j * 16 - 10;
-                NtkTreeNode *anc = ancestors[anc_count - 1 - j];
-                bool last = is_last_child(anc);
-                
-                if (j == level) {
-                    int line_h = last ? 8 : NTK_TREE_ROW_H;
-                    ntk_painter_set_color(p, dark);
-                    ntk_painter_draw_line(p, col_x, row_y, col_x, row_y + line_h);
-                    
-                    int line_end_x = (node->child_count > 0) ? (x + 12 + indent) : (x + 12 + indent + 6);
-                    ntk_painter_draw_line(p, col_x, row_y + 8, line_end_x, row_y + 8);
-                } else {
-                    if (!last) {
-                        ntk_painter_set_color(p, dark);
-                        ntk_painter_draw_line(p, col_x, row_y, col_x, row_y + NTK_TREE_ROW_H);
-                    }
-                }
+static void tree_paint_node(NtkWidget *widget,
+                            NtkPainter *painter,
+                            NtkTreeNode *node,
+                            int depth,
+                            int *row) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    NtkStyle *style = ntk_widget_get_style(widget);
+
+    if (node->parent) {
+        NtkPoint origin = ntk_widget_map_to_global(widget, NTK_POINT(0, 0));
+        NtkRect geometry = ntk_widget_get_geometry(widget);
+        int row_y = origin.y + 2 + *row * NTK_TREE_ROW_HEIGHT;
+        int toggle_x = origin.x + 4 + depth * NTK_TREE_INDENT;
+        NtkRect row_rect = NTK_RECT(origin.x + 2, row_y,
+                                    geometry.width - 4, NTK_TREE_ROW_HEIGHT);
+
+        if (view->selected_node == node) {
+            ntk_painter_set_color(painter,
+                                  ntk_style_get_color(style, NTK_STYLE_ROLE_SELECTION_BG));
+            ntk_painter_fill_rect(painter, row_rect);
+            ntk_painter_set_color(painter,
+                                  ntk_style_get_color(style, NTK_STYLE_ROLE_SELECTION_TEXT));
+        } else {
+            ntk_painter_set_color(painter,
+                                  ntk_style_get_color(style, NTK_STYLE_ROLE_TEXT_PRIMARY));
+        }
+
+        if (node->may_have_children || node->child_count > 0) {
+            NtkRect toggle_rect = NTK_RECT(toggle_x, row_y + 4, 11, 11);
+            ntk_painter_draw_rect(painter, toggle_rect);
+            ntk_painter_draw_line(painter, toggle_x + 2, row_y + 9,
+                                  toggle_x + 9, row_y + 9);
+            if (!node->expanded) {
+                ntk_painter_draw_line(painter, toggle_x + 5, row_y + 6,
+                                      toggle_x + 5, row_y + 12);
             }
         }
 
-        if (node->child_count > 0) {
-            if (p) {
-                ntk_painter_set_color(p, ntk_style_get_color(style, NTK_STYLE_ROLE_PANEL_BG));
-                ntk_painter_fill_rect(p, toggle_r);
-                ntk_painter_draw_bevel_raised(p, toggle_r, light, dark);
-                ntk_painter_set_color(p, text_col);
-                ntk_painter_draw_line(p, toggle_r.x + 3, toggle_r.y + 6, toggle_r.x + 9, toggle_r.y + 6); // Horizontal line
-                if (!node->expanded) {
-                    ntk_painter_draw_line(p, toggle_r.x + 6, toggle_r.y + 3, toggle_r.x + 6, toggle_r.y + 9); // Vertical line
-                }
-            }
-
-            if (hit_node && mouse_y >= row_y && mouse_y < row_y + NTK_TREE_ROW_H) {
-                if (mouse_x >= toggle_r.x && mouse_x <= toggle_r.x + toggle_r.width) {
-                    *hit_node = node;
-                    *toggle_clicked = true;
-                }
-            }
+        int text_x = toggle_x + 15;
+        if (node->icon) {
+            ntk_painter_draw_pixmap(painter, node->icon, text_x, row_y + 2);
+            text_x += 18;
         }
+        ntk_painter_draw_text(painter, node->text ? node->text : "", text_x, row_y + 2);
 
-        NtkRect label_r = NTK_RECT(x + 12 + indent + 16, row_y, width - (12 + indent + 16), NTK_TREE_ROW_H);
-        
-        if (p) {
-            bool is_sel = (node == selected);
-            if (is_sel) {
-                ntk_painter_set_color(p, ntk_style_get_color(style, NTK_STYLE_ROLE_SELECTION_BG));
-                ntk_painter_fill_rect(p, label_r);
-                ntk_painter_set_color(p, ntk_style_get_color(style, NTK_STYLE_ROLE_SELECTION_TEXT));
-            } else {
-                ntk_painter_set_color(p, text_col);
-            }
-
-            int pad_y = (NTK_TREE_ROW_H - ntk_font_get_line_height(font)) / 2;
-            ntk_painter_draw_text(p, node->text, label_r.x + 2, label_r.y + pad_y);
-        }
-
-        if (hit_node && !(*toggle_clicked) && mouse_y >= row_y && mouse_y < row_y + NTK_TREE_ROW_H) {
-            if (mouse_x >= label_r.x && mouse_x <= label_r.x + label_r.width) {
-                *hit_node = node;
-                *toggle_clicked = false;
-            }
-        }
-
-        y += NTK_TREE_ROW_H;
-        indent += 16;
+        ++*row;
+        ++depth;
     }
 
     if (node->expanded) {
-        for (int i = 0; i < node->child_count; i++) {
-            y = traverse_nodes(p, node->children[i], font, style, text_col, light, dark, x, y, width, indent, selected, mouse_y, hit_node, toggle_clicked, mouse_x);
+        for (int i = 0; i < node->child_count; ++i) {
+            tree_paint_node(widget, painter, node->children[i], depth, row);
         }
     }
-
-    return y;
 }
-static void tree_paint(NtkWidget *w, NtkPainter *p) {
-    NtkTreeViewInstance *inst = ntk_widget_get_instance_data(w);
-    NtkRect geom = ntk_widget_get_geometry(w);
-    NtkStyle *style = ntk_widget_get_style(w);
-    NtkColor bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WIDGET_BG);
-    NtkColor light = ntk_style_get_color(style, NTK_STYLE_ROLE_BORDER_LIGHT);
-    NtkColor dark = ntk_style_get_color(style, NTK_STYLE_ROLE_BORDER_DARK);
-    NtkColor text_col = ntk_style_get_color(style, NTK_STYLE_ROLE_TEXT_PRIMARY);
-    NtkPoint origin = ntk_widget_map_to_global(w, NTK_POINT(0, 0));
-    NtkRect r = NTK_RECT(origin.x, origin.y, geom.width, geom.height);
-    ntk_painter_set_color(p, bg);
-    ntk_painter_fill_rect(p, r);
-    ntk_painter_draw_bevel_sunken(p, r, light, dark);
+
+static NtkTreeNode *tree_hit_test(NtkTreeNode *node,
+                                  int depth,
+                                  int wanted_row,
+                                  int *current_row,
+                                  int mouse_x,
+                                  bool *toggle_hit) {
+    if (node->parent) {
+        if (*current_row == wanted_row) {
+            int toggle_x = 4 + depth * NTK_TREE_INDENT;
+            *toggle_hit = mouse_x >= toggle_x && mouse_x < toggle_x + 15;
+            return node;
+        }
+        ++*current_row;
+        ++depth;
+    }
+
+    if (node->expanded) {
+        for (int i = 0; i < node->child_count; ++i) {
+            NtkTreeNode *hit = tree_hit_test(node->children[i], depth, wanted_row,
+                                             current_row, mouse_x, toggle_hit);
+            if (hit) return hit;
+        }
+    }
+    return NULL;
+}
+
+static void tree_paint(NtkWidget *widget, NtkPainter *painter) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    NtkStyle *style = ntk_widget_get_style(widget);
+    NtkRect geometry = ntk_widget_get_geometry(widget);
+    NtkPoint origin = ntk_widget_map_to_global(widget, NTK_POINT(0, 0));
+    NtkRect bounds = NTK_RECT(origin.x, origin.y, geometry.width, geometry.height);
+
+    ntk_painter_set_color(painter,
+                          ntk_style_get_color(style, NTK_STYLE_ROLE_WIDGET_BG));
+    ntk_painter_fill_rect(painter, bounds);
+    ntk_painter_draw_bevel_sunken(
+        painter, bounds,
+        ntk_style_get_color(style, NTK_STYLE_ROLE_BORDER_LIGHT),
+        ntk_style_get_color(style, NTK_STYLE_ROLE_BORDER_DARK));
+
     NtkFont *font = ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT);
-    ntk_painter_set_font(p, font);
-    ntk_painter_set_clip_rect(p, NTK_RECT(r.x + 2, r.y + 2, r.width - 4, r.height - 4));
+    ntk_painter_set_font(painter, font);
+    ntk_painter_set_clip_rect(painter,
+                              NTK_RECT(origin.x + 2, origin.y + 2,
+                                       geometry.width - 4, geometry.height - 4));
 
-    traverse_nodes(p, &inst->root, font, style, text_col, light, dark, r.x + 2, r.y + 2, r.width - 4, 0, inst->selected_node, 0, NULL, NULL, 0);
-
-    ntk_painter_clear_clip(p);
+    int row = 0;
+    tree_paint_node(widget, painter, &view->root, 0, &row);
+    ntk_painter_clear_clip(painter);
 }
 
-static bool tree_handle_event(NtkWidget *w, NtkEvent *e) {
-    NtkTreeViewInstance *inst = ntk_widget_get_instance_data(w);
-    NtkRect geom = ntk_widget_get_geometry(w);
-    NtkStyle *style = ntk_widget_get_style(w);
-
-    if (e->type == NTK_EVENT_MOUSE_PRESS && e->mouse_button == NTK_MOUSE_BUTTON_LEFT) {
-        NtkPoint p = e->mouse_pos;
-        NtkTreeNode *hit_node = NULL;
-        bool toggle_clicked = false;
-        NtkFont *font = ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT);
-        traverse_nodes(NULL, &inst->root, font, style, 0, 0, 0, 2, 2, geom.width - 4, 0, inst->selected_node, p.y, &hit_node, &toggle_clicked, p.x);
-
-        if (hit_node) {
-            if (toggle_clicked) {
-                hit_node->expanded = !hit_node->expanded;
-            } else {
-                inst->selected_node = hit_node;
-                ntk_widget_emit(w, "selection-changed", hit_node);
-            }
-            ntk_widget_repaint(w);
-            return true;
-        }
+static bool tree_handle_event(NtkWidget *widget, NtkEvent *event) {
+    if (event->type != NTK_EVENT_MOUSE_PRESS ||
+        event->mouse_button != NTK_MOUSE_BUTTON_LEFT) {
+        return false;
     }
-    return false;
-}
 
-static NtkSize tree_preferred_size(NtkWidget *w) {
-    (void)w;
-    return NTK_SIZE(150, 100);
-}
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    int wanted_row = (event->mouse_pos.y - 2) / NTK_TREE_ROW_HEIGHT;
+    int current_row = 0;
+    bool toggle_hit = false;
+    NtkTreeNode *node = tree_hit_test(&view->root, 0, wanted_row, &current_row,
+                                      event->mouse_pos.x, &toggle_hit);
+    if (!node) return false;
 
-static void tree_destroy(NtkWidget *w) {
-    NtkTreeViewInstance *inst = ntk_widget_get_instance_data(w);
-    for (int i = 0; i < inst->root.child_count; i++) {
-        free_node(inst->root.children[i]);
+    if (toggle_hit && (node->may_have_children || node->child_count > 0)) {
+        view->selected_node = node;
+        node->expanded = !node->expanded;
+        ntk_widget_emit(widget, node->expanded ? "expanded" : "collapsed", node);
+    } else {
+        view->selected_node = node;
+        ntk_widget_emit(widget, "selection-changed", node);
     }
+
+    ntk_widget_repaint(widget);
+    return true;
+}
+
+static NtkSize tree_preferred_size(NtkWidget *widget) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    return NTK_SIZE(180,
+                    tree_visible_node_count(&view->root) * NTK_TREE_ROW_HEIGHT + 4);
+}
+
+static void tree_destroy(NtkWidget *widget) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    tree_node_destroy(&view->root);
+}
+
+NtkWidget *ntk_tree_view_new(NtkWidget *parent) {
+    NtkWidget *widget = ntk_widget_new_with_class(parent, &tree_class,
+                                                   sizeof(NtkTreeViewInstance));
+    if (!widget) return NULL;
+
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    view->root.text = strdup("Root");
+    view->root.expanded = true;
+    return widget;
+}
+
+NtkTreeNode *ntk_tree_view_get_root(NtkWidget *widget) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    return view ? &view->root : NULL;
+}
+
+NtkTreeNode *ntk_tree_node_add_child(NtkTreeNode *parent, const char *text) {
+    if (!parent) return NULL;
+
+    if (parent->child_count == parent->child_capacity) {
+        int new_capacity = parent->child_capacity ? parent->child_capacity * 2 : 8;
+        NtkTreeNode **children = realloc(
+            parent->children, (size_t)new_capacity * sizeof(*children));
+        if (!children) return NULL;
+        parent->children = children;
+        parent->child_capacity = new_capacity;
+    }
+
+    NtkTreeNode *node = calloc(1, sizeof(*node));
+    if (!node) return NULL;
+    node->text = strdup(text ? text : "");
+    if (!node->text) {
+        free(node);
+        return NULL;
+    }
+
+    node->parent = parent;
+    parent->children[parent->child_count++] = node;
+    parent->may_have_children = true;
+    return node;
+}
+
+void ntk_tree_node_clear_children(NtkTreeNode *node) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; ++i) tree_node_destroy(node->children[i]);
+    free(node->children);
+    node->children = NULL;
+    node->child_count = 0;
+    node->child_capacity = 0;
+}
+
+void ntk_tree_node_set_text(NtkTreeNode *node, const char *text) {
+    if (!node) return;
+    char *copy = strdup(text ? text : "");
+    if (!copy) return;
+    free(node->text);
+    node->text = copy;
+}
+
+const char *ntk_tree_node_get_text(NtkTreeNode *node) {
+    return node && node->text ? node->text : "";
+}
+
+void ntk_tree_node_set_icon(NtkTreeNode *node, NtkPixmap *icon) {
+    if (!node) return;
+    if (node->icon) ntk_pixmap_destroy(node->icon);
+    node->icon = icon;
+}
+
+NtkPixmap *ntk_tree_node_get_icon(NtkTreeNode *node) {
+    return node ? node->icon : NULL;
+}
+
+void ntk_tree_node_set_user_data(NtkTreeNode *node, void *data) {
+    if (node) node->user_data = data;
+}
+
+void *ntk_tree_node_get_user_data(NtkTreeNode *node) {
+    return node ? node->user_data : NULL;
+}
+
+void ntk_tree_node_set_has_children(NtkTreeNode *node, bool has_children) {
+    if (node) node->may_have_children = has_children;
+}
+
+bool ntk_tree_node_has_children(NtkTreeNode *node) {
+    return node && (node->may_have_children || node->child_count > 0);
+}
+
+void ntk_tree_node_set_expanded(NtkTreeNode *node, bool expanded) {
+    if (node) node->expanded = expanded;
+}
+
+bool ntk_tree_node_is_expanded(NtkTreeNode *node) {
+    return node && node->expanded;
+}
+
+void ntk_tree_view_set_selected(NtkWidget *widget, NtkTreeNode *node) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    if (!view) return;
+    view->selected_node = node;
+    ntk_widget_repaint(widget);
+}
+
+NtkTreeNode *ntk_tree_view_get_selected(NtkWidget *widget) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    return view ? view->selected_node : NULL;
+}
+
+int ntk_tree_view_get_visible_height(NtkWidget *widget) {
+    NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
+    return view ? tree_visible_node_count(&view->root) * NTK_TREE_ROW_HEIGHT + 4 : 0;
 }

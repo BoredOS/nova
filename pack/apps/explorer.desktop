@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=File Manager
+Comment=Browse and manage files and folders
+Exec=/bin/explorer.elf
+Icon=/Library/Icons/serenityicons/32x32/app-file-manager.png
+Terminal=false
+Categories=System;Utility;FileManager;
+

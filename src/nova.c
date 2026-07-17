@@ -521,7 +521,9 @@ static const NovaKeycode scancode_to_novakey[] = {
     [0x30] = KEY_B, [0x31] = KEY_N, [0x32] = KEY_M,
     [0x36] = KEY_RSHIFT,
     [0x38] = KEY_LALT,
-    [0x39] = KEY_SPACE
+    [0x39] = KEY_SPACE,
+    [0x3C] = KEY_F2,
+    [0x3F] = KEY_F5,
 };
 
 static const NovaKeycode scancode_to_novakey_ext[] = {
@@ -531,6 +533,8 @@ static const NovaKeycode scancode_to_novakey_ext[] = {
     [0x4D] = KEY_RIGHT,
     [0x1D] = KEY_RCTRL,
     [0x38] = KEY_RALT,
+    [0x47] = KEY_HOME,
+    [0x53] = KEY_DELETE,
     [0x1C] = KEY_ENTER // Numpad Enter
 };
 

@@ -51,6 +51,7 @@ typedef struct {
     char      *label;
     NtkPixmap *icon;
     NtkWidget *submenu;
+    bool       checked;
 } NtkMenuItemInstance;
 static void menu_bar_paint(NtkWidget *w, NtkPainter *p);
 static bool menu_bar_handle_event(NtkWidget *w, NtkEvent *e);
@@ -457,6 +458,7 @@ static bool menu_handle_event(NtkWidget *w, NtkEvent *e) {
                 if (data->item && !data->is_separator) {
                     NtkMenuItemInstance *item_inst = ntk_widget_get_instance_data(data->item);
                     
+                    if (!ntk_widget_is_enabled(data->item)) return true;
                     if (item_inst && item_inst->submenu) {
                         menu_close_submenus(inst);
                         menu_open_submenu_for_item(w, inst, idx);
@@ -552,6 +554,19 @@ NtkWidget* ntk_menu_item_get_submenu(NtkWidget *item) {
     return inst ? inst->submenu : NULL;
 }
 
+void ntk_menu_item_set_checked(NtkWidget *item, bool checked) {
+    NtkMenuItemInstance *inst = ntk_widget_get_instance_data(item);
+    if (!inst) return;
+
+    inst->checked = checked;
+    ntk_widget_repaint(item);
+}
+
+bool ntk_menu_item_is_checked(NtkWidget *item) {
+    NtkMenuItemInstance *inst = ntk_widget_get_instance_data(item);
+    return inst && inst->checked;
+}
+
 static void menu_item_paint(NtkWidget *w, NtkPainter *p) {
     NtkMenuItemInstance *inst = ntk_widget_get_instance_data(w);
     NtkRect geom = ntk_widget_get_geometry(w);
@@ -578,15 +593,19 @@ static void menu_item_paint(NtkWidget *w, NtkPainter *p) {
         }
     }
 
-    NtkColor text_col = hovered ? 
+    NtkColor text_col = !ntk_widget_is_enabled(w) ?
+        ntk_style_get_color(style, NTK_STYLE_ROLE_TEXT_DISABLED) : hovered ?
         ntk_style_get_color(style, NTK_STYLE_ROLE_SELECTION_TEXT) : 
         ntk_style_get_color(style, NTK_STYLE_ROLE_TEXT_PRIMARY);
 
     int curr_x = r.x + NTK_MENU_H_PAD;
     int pad_y = (r.height - ntk_font_get_line_height(font)) / 2;
 
-    if (inst->icon) {
-        int iw = ntk_pixmap_get_width(inst->icon);
+    if (inst->checked) {
+        ntk_painter_set_color(p, text_col);
+        ntk_painter_draw_line(p, curr_x + 2, r.y + 12, curr_x + 6, r.y + 16);
+        ntk_painter_draw_line(p, curr_x + 6, r.y + 16, curr_x + 13, r.y + 7);
+    } else if (inst->icon) {
         int ih = ntk_pixmap_get_height(inst->icon);
         int iy = r.y + (r.height - ih) / 2;
         ntk_painter_draw_pixmap(p, inst->icon, curr_x, iy);

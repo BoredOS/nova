@@ -13,14 +13,14 @@ DESTDIR ?= $(abspath build/dist)
 
 CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -g -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -m64 -march=x86-64 -mno-red-zone \
-          -I$(SDK_PATH)/include -Ilibnovaproto -Intk -I. -Isrc
+          -Ilibnovaproto -Intk -I. -Isrc -I$(SDK_PATH)/include
 
 LDFLAGS = -static -no-pie -Wl,-Ttext=0x40000000 \
           -Wl,--no-dynamic-linker -Wl,-z,text -Wl,-z,max-page-size=0x1000 \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libntk.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf explorer.elf
 
 all: $(LIBS)
 	$(MAKE) export-sdk
@@ -64,7 +64,7 @@ obj/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 %.elf: obj/%.o $(LIBS)
-	$(CC) $< -lntk -lnovaproto $(LDFLAGS) -o $@
+	$(CC) $< obj/libntk.a obj/libnovaproto.a $(LDFLAGS) -o $@
 
 install: all
 	mkdir -p $(DESTDIR)/bin

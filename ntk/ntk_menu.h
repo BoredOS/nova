@@ -18,5 +18,7 @@ NtkWidget*  ntk_menu_item_new_with_icon(const char *label, NtkPixmap *icon);
 void        ntk_menu_item_set_submenu(NtkWidget *item, NtkWidget *submenu);
 bool        ntk_menu_item_has_submenu(NtkWidget *item);
 NtkWidget*  ntk_menu_item_get_submenu(NtkWidget *item);
+void        ntk_menu_item_set_checked(NtkWidget *item, bool checked);
+bool        ntk_menu_item_is_checked(NtkWidget *item);
 
 #endif // NTK_MENU_H

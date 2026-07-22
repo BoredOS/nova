@@ -55,11 +55,27 @@ NtkWidget* ntk_app_get_active_popup(void) {
 }
 
 void ntk_app_notify_widget_destroyed(NtkWidget *w) {
-    if (g_hovered_widget == w) {
-        g_hovered_widget = NULL;
+    if (!w) return;
+
+    if (g_hovered_widget) {
+        NtkWidget *cur = g_hovered_widget;
+        while (cur) {
+            if (cur == w) {
+                g_hovered_widget = NULL;
+                break;
+            }
+            cur = ntk_widget_get_parent(cur);
+        }
     }
-    if (g_active_popup == w) {
-        g_active_popup = NULL;
+    if (g_active_popup) {
+        NtkWidget *cur = g_active_popup;
+        while (cur) {
+            if (cur == w) {
+                g_active_popup = NULL;
+                break;
+            }
+            cur = ntk_widget_get_parent(cur);
+        }
     }
 }
 
@@ -371,23 +387,35 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
         }
 
         int pr = poll(pfds, nfds, (int)timeout);
+        if (pr > 0 && (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            g_app->running = false;
+            break;
+        }
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
 
+        bool custom_fd_fired = false;
         if (pr > 0 && nfds > 1 && (pfds[1].revents & POLLIN)) {
             if (g_app->custom_fd_cb) {
                 g_app->custom_fd_cb(g_app->custom_fd, g_app->custom_fd_data);
+                custom_fd_fired = true;
             }
         }
 
+        bool nova_events_processed = false;
         if ((pr > 0 && (pfds[0].revents & POLLIN)) || ntk_nova_pending_events()) {
+            nova_events_processed = true;
             NtkEvent ev;
             while (ntk_nova_pending_events() || (poll(pfds, 1, 0) > 0 && (pfds[0].revents & POLLIN))) {
                 if (ntk_nova_poll_event(g_app->fd, &ev) < 0) {
-                    g_app->running = false;
-                    break;
+                    struct pollfd check_pfd = { .fd = g_app->fd, .events = POLLIN };
+                    if (poll(&check_pfd, 1, 0) > 0 && (check_pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+                        g_app->running = false;
+                        break;
+                    }
+                    continue;
                 }
 
                 uint32_t target_surf_id = (uint32_t)(uintptr_t)ev.target;
@@ -502,7 +530,9 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
                     if (klass && klass->handle_event) klass->handle_event(win, &ev);
                 }
             }
+        }
 
+        if (custom_fd_fired || nova_events_processed) {
             app_draw_windows();
         }
     }

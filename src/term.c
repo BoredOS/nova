@@ -615,6 +615,10 @@ static void draw_cell_fast(struct NtkPainter *p, int gx, int gy, term_cell_t cel
         clip_y1 = p->clip.y;
         clip_x2 = p->clip.x + p->clip.width;
         clip_y2 = p->clip.y + p->clip.height;
+        if (clip_x1 < 0) clip_x1 = 0;
+        if (clip_y1 < 0) clip_y1 = 0;
+        if (clip_x2 > p->width) clip_x2 = p->width;
+        if (clip_y2 > p->height) clip_y2 = p->height;
     }
 
     if (gx + cell_w <= clip_x1 || gy + cell_h <= clip_y1 || gx >= clip_x2 || gy >= clip_y2) return;
@@ -700,6 +704,10 @@ static void draw_cursor_fast(struct NtkPainter *p, term_t *term) {
             clip_y1 = p->clip.y;
             clip_x2 = p->clip.x + p->clip.width;
             clip_y2 = p->clip.y + p->clip.height;
+            if (clip_x1 < 0) clip_x1 = 0;
+            if (clip_y1 < 0) clip_y1 = 0;
+            if (clip_x2 > p->width) clip_x2 = p->width;
+            if (clip_y2 > p->height) clip_y2 = p->height;
         }
 
         for (int y = 0; y < cell_h; y++) {

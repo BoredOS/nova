@@ -285,6 +285,7 @@ typedef struct surface {
 static surface_t *surface_head = NULL;
 static surface_t *surface_tail = NULL;
 static uint32_t next_surface_id = 1;
+static uint64_t g_shm_sequence_id = 1;
 
 // Global theme options
 static uint32_t active_titlebar_top = 0xFF393939;
@@ -466,17 +467,17 @@ static void mark_dirty_rect(int x, int y, int w, int h) {
         dirty_w = x2 - x1;
         dirty_h = y2 - y1;
         has_dirty_rect = true;
-        return;
+    } else {
+        int old_x2 = dirty_x + dirty_w;
+        int old_y2 = dirty_y + dirty_h;
+        if (x1 < dirty_x) dirty_x = x1;
+        if (y1 < dirty_y) dirty_y = y1;
+        if (x2 > old_x2) old_x2 = x2;
+        if (y2 > old_y2) old_y2 = y2;
+        dirty_w = old_x2 - dirty_x;
+        dirty_h = old_y2 - dirty_y;
     }
-
-    int old_x2 = dirty_x + dirty_w;
-    int old_y2 = dirty_y + dirty_h;
-    if (x1 < dirty_x) dirty_x = x1;
-    if (y1 < dirty_y) dirty_y = y1;
-    if (x2 > old_x2) old_x2 = x2;
-    if (y2 > old_y2) old_y2 = y2;
-    dirty_w = old_x2 - dirty_x;
-    dirty_h = old_y2 - dirty_y;
+    needs_composite = true;
 }
 
 // Signal self-pipe descriptors
@@ -1782,7 +1783,7 @@ void compositor_composite(void) {
     int render_y = 0;
     int render_w = screen_w;
     int render_h = screen_h;
-    bool partial_render = false;
+    bool partial_render = has_dirty_rect;
 
     if (partial_render) {
         render_x = dirty_x;
@@ -1794,8 +1795,11 @@ void compositor_composite(void) {
     // Fill background solid Catppuccin color
     if (partial_render) {
         for (int y = render_y; y < render_y + render_h; y++) {
+            if (y < 0 || y >= screen_h) continue;
             uint32_t *row = &back_buffer[y * screen_w];
-            for (int x = render_x; x < render_x + render_w; x++) {
+            int sx = render_x < 0 ? 0 : render_x;
+            int ex = (render_x + render_w) > screen_w ? screen_w : (render_x + render_w);
+            for (int x = sx; x < ex; x++) {
                 row[x] = 0xFF1E1E2E;
             }
         }
@@ -1868,14 +1872,25 @@ void compositor_composite(void) {
                         title_block_w = max_title_block_w;
                     }
                     
+                    uint32_t grad_buf[1024];
+                    int copy_w = t_w < 1024 ? t_w : 1024;
+                    if (t_start == t_end) {
+                        for (int i = 0; i < copy_w; i++) grad_buf[i] = t_start;
+                    } else {
+                        for (int i = 0; i < copy_w; i++) {
+                            float t = (float)i / (copy_w > 1 ? copy_w - 1 : 1);
+                            grad_buf[i] = lerp_color(t_start, t_end, t);
+                        }
+                    }
+
                     for (int py = t_y; py < t_y + t_h; py++) {
                         if (py < 0 || py >= screen_h) continue;
-                        uint32_t *row = &back_buffer[py * screen_w];
-                        for (int px = t_x; px < t_x + t_w; px++) {
-                            if (px < 0 || px >= screen_w) continue;
-                            float t = (float)(px - t_x) / (t_w > 1 ? t_w - 1 : 1);
-                            row[px] = lerp_color(t_start, t_end, t);
-                        }
+                        int start_x = t_x < 0 ? 0 : t_x;
+                        int end_x = (t_x + copy_w) > screen_w ? screen_w : (t_x + copy_w);
+                        if (start_x >= end_x) continue;
+                        uint32_t *dst = &back_buffer[py * screen_w + start_x];
+                        const uint32_t *src = &grad_buf[start_x - t_x];
+                        memcpy(dst, src, (size_t)(end_x - start_x) * sizeof(uint32_t));
                     }
                     
                     int line_start_x = t_x + title_block_w + 4;
@@ -1988,9 +2003,11 @@ void compositor_composite(void) {
 // Client IPC message handlers
 void handle_client_message(int fd, surface_t **surf_ptr) {
     NovaFrameHeader header;
-    uint8_t buffer[1024];
+    uint8_t stack_buf[1024];
+    uint8_t *buffer = stack_buf;
+    bool allocated = false;
 
-    memset(buffer, 0, sizeof(buffer));
+    memset(stack_buf, 0, sizeof(stack_buf));
 
     if (recv_all(fd, &header, sizeof(header)) < 0) {
         return;
@@ -2001,17 +2018,20 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     }
 
     if (header.payload_size > 0) {
-        uint32_t to_read = header.payload_size;
-        if (to_read > sizeof(buffer)) to_read = sizeof(buffer);
-
-        if (recv_all(fd, buffer, to_read) < 0) {
+        if (header.payload_size > 64 * 1024 * 1024) {
             return;
         }
 
-        if (header.payload_size > to_read) {
-            if (discard_socket_bytes(fd, header.payload_size - to_read) < 0) {
-                return;
-            }
+        if (header.payload_size > sizeof(stack_buf)) {
+            buffer = malloc(header.payload_size + 1);
+            if (!buffer) return;
+            memset(buffer, 0, header.payload_size + 1);
+            allocated = true;
+        }
+
+        if (recv_all(fd, buffer, header.payload_size) < 0) {
+            if (allocated) free(buffer);
+            return;
         }
     }
 
@@ -2037,7 +2057,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             surf->mapped = false;
             surf->resize_last_request_ms = 0;
 
-            snprintf(surf->shm_path, sizeof(surf->shm_path), "/dev/shm/nova_surf_%d_%d_%u", getpid(), fd, surf->surface_id);
+            snprintf(surf->shm_path, sizeof(surf->shm_path), "/dev/shm/nova_surf_%d_%u_%llu", getpid(), surf->surface_id, (unsigned long long)g_shm_sequence_id++);
             int shm_fd = open(surf->shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
             if (shm_fd < 0) {
                 unlink(surf->shm_path);
@@ -2090,7 +2110,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (surf) {
                 surf->pending_w = p->w;
                 surf->pending_h = p->h;
-                snprintf(surf->pending_shm_path, sizeof(surf->pending_shm_path), "/dev/shm/nova_surf_%d_%d_%u_v2", getpid(), fd, surf->surface_id);
+                snprintf(surf->pending_shm_path, sizeof(surf->pending_shm_path), "/dev/shm/nova_surf_%d_%u_%llu", getpid(), surf->surface_id, (unsigned long long)g_shm_sequence_id++);
 
                 int shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
                 if (shm_fd < 0) {
@@ -2373,6 +2393,10 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
 
         default:
             break;
+    }
+
+    if (allocated) {
+        free(buffer);
     }
 }
 
@@ -2694,7 +2718,7 @@ int main(int argc, char *argv[]) {
                                         }
 
                                         if (click_region == 1) {
-                                            uint32_t click_time = get_ticks() * 16;
+                                            uint32_t click_time = get_ticks();
                                             if (hovered->surface_id == last_titlebar_click_surf_id &&
                                                 click_time - last_titlebar_click_ms < 250) {
                                                 toggle_maximize(hovered);
@@ -3057,6 +3081,12 @@ int main(int argc, char *argv[]) {
     }
 
     // Clean up
+    for (int i = 0; i < autostart_count; i++) {
+        if (autostarts[i].pid > 0) {
+            kill(autostarts[i].pid, SIGTERM);
+        }
+    }
+
     if (kbd_fd >= 0) close(kbd_fd);
     if (mouse_fd >= 0) close(mouse_fd);
     close(server_fd);

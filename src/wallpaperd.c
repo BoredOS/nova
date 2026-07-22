@@ -141,6 +141,9 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         int pr = poll(&pfd, 1, 1000);
+        if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            break;
+        }
         if (pr > 0 && (pfd.revents & POLLIN)) {
             NtkEvent ev;
             if (ntk_nova_poll_event(fd, &ev) < 0) {

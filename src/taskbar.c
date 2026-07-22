@@ -2091,8 +2091,11 @@ int main(int argc, char *argv[]) {
             timeout = 0;
         }
         int pr = poll(&pfd, 1, timeout);
+        if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            break;
+        }
 
-        uint32_t now = get_ticks() * 16;
+        uint32_t now = get_ticks();
         if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
             bar_dirty = true;

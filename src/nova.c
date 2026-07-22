@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -126,6 +127,21 @@ static void fill_rect_safe(uint32_t *buffer, int w, int h, int rx, int ry, int r
     int y1 = ry < 0 ? 0 : ry;
     int x2 = rx + rw > w ? w : rx + rw;
     int y2 = ry + rh > h ? h : ry + rh;
+    for (int y = y1; y < y2; y++) {
+        uint32_t *row = &buffer[y * w];
+        for (int x = x1; x < x2; x++) {
+            row[x] = color;
+        }
+    }
+}
+
+static void fill_rect_safe_band(uint32_t *buffer, int w, int h, int rx, int ry, int rw, int rh, uint32_t color, int band_y_start, int band_y_end) {
+    int x1 = rx < 0 ? 0 : rx;
+    int y1 = ry < 0 ? 0 : ry;
+    int x2 = rx + rw > w ? w : rx + rw;
+    int y2 = ry + rh > h ? h : ry + rh;
+    if (y1 < band_y_start) y1 = band_y_start;
+    if (y2 > band_y_end) y2 = band_y_end;
     for (int y = y1; y < y2; y++) {
         uint32_t *row = &buffer[y * w];
         for (int x = x1; x < x2; x++) {
@@ -1736,6 +1752,72 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
     (void)blit_area;
 }
 
+static void blit_surface_pixels_band(surface_t *surf, int dst_x, int dst_y, int copy_w, int copy_h, int band_y_start, int band_y_end) {
+    if (!surf || !surf->pixels || copy_w <= 0 || copy_h <= 0) return;
+
+    int draw_x1 = dst_x;
+    int draw_y1 = dst_y;
+    int draw_x2 = dst_x + copy_w;
+    int draw_y2 = dst_y + copy_h;
+
+    if (draw_x1 < surf->x) draw_x1 = surf->x;
+    if (draw_y1 < surf->y) draw_y1 = surf->y;
+    if (draw_x2 > surf->x + (int)surf->buffer_w) draw_x2 = surf->x + (int)surf->buffer_w;
+    if (draw_y2 > surf->y + (int)surf->buffer_h) draw_y2 = surf->y + (int)surf->buffer_h;
+    if (draw_x1 < 0) draw_x1 = 0;
+    if (draw_y1 < 0) draw_y1 = 0;
+    if (draw_x2 > screen_w) draw_x2 = screen_w;
+    if (draw_y2 > screen_h) draw_y2 = screen_h;
+
+    if (draw_y1 < band_y_start) draw_y1 = band_y_start;
+    if (draw_y2 > band_y_end) draw_y2 = band_y_end;
+
+    int draw_w = draw_x2 - draw_x1;
+    int draw_h = draw_y2 - draw_y1;
+    if (draw_w <= 0 || draw_h <= 0) return;
+
+    int src_x = draw_x1 - surf->x;
+    int src_y = draw_y1 - surf->y;
+    bool opaque = (surf->flags & SURFACE_FLAG_TRANSPARENT) == 0;
+
+    for (int y = 0; y < draw_h; y++) {
+        uint32_t *dst_row = &back_buffer[(draw_y1 + y) * screen_w + draw_x1];
+        uint32_t *src_row = &surf->pixels[(src_y + y) * surf->buffer_w + src_x];
+        if (opaque) {
+            memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
+            continue;
+        }
+
+        for (int x = 0; x < draw_w; x++) {
+            uint32_t src_pixel = src_row[x];
+            uint32_t src_a = (src_pixel >> 24) & 0xFF;
+            if (src_a == 0) continue;
+            if (src_a == 255) {
+                dst_row[x] = src_pixel;
+                continue;
+            }
+
+            uint32_t dst_pixel = dst_row[x];
+            uint32_t dst_a = (dst_pixel >> 24) & 0xFF;
+            uint32_t out_a = src_a + dst_a * (255 - src_a) / 255;
+            if (out_a == 0) continue;
+
+            uint32_t src_r = (src_pixel >> 16) & 0xFF;
+            uint32_t src_g = (src_pixel >> 8) & 0xFF;
+            uint32_t src_b = src_pixel & 0xFF;
+            uint32_t dst_r = (dst_pixel >> 16) & 0xFF;
+            uint32_t dst_g = (dst_pixel >> 8) & 0xFF;
+            uint32_t dst_b = dst_pixel & 0xFF;
+
+            uint32_t out_r = (src_r * src_a + dst_r * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_g = (src_g * src_a + dst_g * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_b = (src_b * src_a + dst_b * dst_a * (255 - src_a) / 255) / out_a;
+
+            dst_row[x] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+}
+
 void update_cursor_atomic_combined(int new_x, int new_y) {
     int cursor_w = 12;
     int cursor_h = 19;
@@ -1767,34 +1849,39 @@ void update_cursor_atomic_combined(int new_x, int new_y) {
     compositor_composite_region(min_x, min_y, bw, bh);
 }
 
-// Compositor Render Loop
-void compositor_composite(void) {
-    int cursor_w = 12;
-    int cursor_h = 19;
+static int compositor_threads = 1;
 
-    if (has_dirty_rect) {
-        mark_dirty_rect(mx, my, cursor_w, cursor_h);
-        if (cursor_visible) {
-            mark_dirty_rect(last_cursor_x, last_cursor_y, cursor_w, cursor_h);
-        }
-    }
+typedef struct {
+    int thread_id;
+    int y_start;
+    int y_end;
+} compositor_worker_t;
 
-    int render_x = 0;
-    int render_y = 0;
-    int render_w = screen_w;
-    int render_h = screen_h;
-    bool partial_render = has_dirty_rect;
+static pthread_t worker_threads[8];
+static compositor_worker_t worker_data[8];
+static pthread_barrier_t start_barrier;
+static pthread_barrier_t done_barrier;
+static bool worker_threads_active = false;
+static bool worker_threads_exit = false;
 
+static int g_render_x = 0;
+static int g_render_y = 0;
+static int g_render_w = 0;
+static int g_render_h = 0;
+static bool g_partial_render = false;
+
+static void compositor_render_band_pixels(int band_y_start, int band_y_end) {
+    int render_x = g_render_x;
+    int render_y = g_render_y;
+    int render_w = g_render_w;
+    int render_h = g_render_h;
+    bool partial_render = g_partial_render;
+
+    // Fill background solid Catppuccin color for rows in [band_y_start, band_y_end)
     if (partial_render) {
-        render_x = dirty_x;
-        render_y = dirty_y;
-        render_w = dirty_w;
-        render_h = dirty_h;
-    }
-
-    // Fill background solid Catppuccin color
-    if (partial_render) {
-        for (int y = render_y; y < render_y + render_h; y++) {
+        int y1 = render_y < band_y_start ? band_y_start : render_y;
+        int y2 = (render_y + render_h) > band_y_end ? band_y_end : (render_y + render_h);
+        for (int y = y1; y < y2; y++) {
             if (y < 0 || y >= screen_h) continue;
             uint32_t *row = &back_buffer[y * screen_w];
             int sx = render_x < 0 ? 0 : render_x;
@@ -1804,8 +1891,13 @@ void compositor_composite(void) {
             }
         }
     } else {
-        for (int i = 0; i < screen_w * screen_h; i++) {
-            back_buffer[i] = 0xFF1E1E2E;
+        int y1 = band_y_start < 0 ? 0 : band_y_start;
+        int y2 = band_y_end > screen_h ? screen_h : band_y_end;
+        for (int y = y1; y < y2; y++) {
+            uint32_t *row = &back_buffer[y * screen_w];
+            for (int x = 0; x < screen_w; x++) {
+                row[x] = 0xFF1E1E2E;
+            }
         }
     }
 
@@ -1836,7 +1928,6 @@ void compositor_composite(void) {
                 bool draw_decorations =
                     has_decorations &&
                     (!partial_render || !dirty_inside_content || (curr->flags & SURFACE_FLAG_TRANSPARENT));
-                uint32_t border_color = curr->focused ? active_border : inactive_border;
 
                 // Render titlebar if NORMAL or FLOATING window
                 if (draw_decorations) {
@@ -1845,129 +1936,173 @@ void compositor_composite(void) {
                     int outer_w = curr->w + BORDER_WIDTH * 2;
                     int outer_h = curr->h + TITLEBAR_HEIGHT + BORDER_WIDTH * 2;
                     
-                    fill_rect_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_w, outer_h, 0xFFB0B0B0);
-                    
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_y + outer_h - 1, 0xFFFFFFFF);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_x + outer_w - 1, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF676767);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF676767);
+                    if (outer_y + outer_h > band_y_start && outer_y < band_y_end) {
+                        fill_rect_safe_band(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_w, outer_h, 0xFFB0B0B0, band_y_start, band_y_end);
+                        
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_y + outer_h - 1, 0xFFFFFFFF);
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_x + outer_w - 1, 0xFFFFFFFF);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF676767);
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF676767);
 
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_y + outer_h - 2, 0xFFFFFFFF);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_x + outer_w - 2, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF676767);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF676767);
-                    uint32_t t_start = curr->focused ? active_titlebar_top : inactive_titlebar_top;
-                    uint32_t t_end = curr->focused ? active_titlebar_bottom : inactive_titlebar_bottom;
-                    int t_x = curr->x;
-                    int t_y = curr->y - TITLEBAR_HEIGHT;
-                    int t_w = curr->w;
-                    int t_h = TITLEBAR_HEIGHT;
-                    
-                    fill_rect_safe(back_buffer, screen_w, screen_h, t_x, t_y, t_w, t_h, 0xFFB0B0B0);
-                    
-                    int title_w = get_title_text_width(curr->title);
-                    int title_block_w = 6 + 16 + 6 + title_w + 12;
-                    int max_title_block_w = t_w - 60;
-                    if (title_block_w > max_title_block_w) {
-                        title_block_w = max_title_block_w;
-                    }
-                    
-                    uint32_t grad_buf[1024];
-                    int copy_w = t_w < 1024 ? t_w : 1024;
-                    if (t_start == t_end) {
-                        for (int i = 0; i < copy_w; i++) grad_buf[i] = t_start;
-                    } else {
-                        for (int i = 0; i < copy_w; i++) {
-                            float t = (float)i / (copy_w > 1 ? copy_w - 1 : 1);
-                            grad_buf[i] = lerp_color(t_start, t_end, t);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_y + outer_h - 2, 0xFFFFFFFF);
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_x + outer_w - 2, 0xFFFFFFFF);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF676767);
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF676767);
+                        uint32_t t_start = curr->focused ? active_titlebar_top : inactive_titlebar_top;
+                        uint32_t t_end = curr->focused ? active_titlebar_bottom : inactive_titlebar_bottom;
+                        int t_x = curr->x;
+                        int t_y = curr->y - TITLEBAR_HEIGHT;
+                        int t_w = curr->w;
+                        int t_h = TITLEBAR_HEIGHT;
+                        
+                        fill_rect_safe_band(back_buffer, screen_w, screen_h, t_x, t_y, t_w, t_h, 0xFFB0B0B0, band_y_start, band_y_end);
+                        
+                        int title_w = get_title_text_width(curr->title);
+                        int title_block_w = 6 + 16 + 6 + title_w + 12;
+                        int max_title_block_w = t_w - 60;
+                        if (title_block_w > max_title_block_w) {
+                            title_block_w = max_title_block_w;
                         }
-                    }
-
-                    for (int py = t_y; py < t_y + t_h; py++) {
-                        if (py < 0 || py >= screen_h) continue;
-                        int start_x = t_x < 0 ? 0 : t_x;
-                        int end_x = (t_x + copy_w) > screen_w ? screen_w : (t_x + copy_w);
-                        if (start_x >= end_x) continue;
-                        uint32_t *dst = &back_buffer[py * screen_w + start_x];
-                        const uint32_t *src = &grad_buf[start_x - t_x];
-                        memcpy(dst, src, (size_t)(end_x - start_x) * sizeof(uint32_t));
-                    }
-                    
-                    int line_start_x = t_x + title_block_w + 4;
-                    int line_end_x = t_x + t_w - 60;
-                    uint32_t line_color = curr->focused ? active_titlebar_top : inactive_titlebar_top;
-                    if (line_start_x < line_end_x) {
-                        for (int offset = 3; offset <= 15; offset += 2) {
-                            draw_line_h_safe(back_buffer, screen_w, screen_h, line_start_x, t_y + offset, line_end_x, line_color);
+                        
+                        uint32_t grad_buf[1024];
+                        int copy_w = t_w < 1024 ? t_w : 1024;
+                        if (t_start == t_end) {
+                            for (int i = 0; i < copy_w; i++) grad_buf[i] = t_start;
+                        } else {
+                            for (int i = 0; i < copy_w; i++) {
+                                float t = (float)i / (copy_w > 1 ? copy_w - 1 : 1);
+                                grad_buf[i] = lerp_color(t_start, t_end, t);
+                            }
                         }
-                    }
-                    draw_decorations_icon(back_buffer, screen_w, screen_h, curr->x + 6, t_y + (TITLEBAR_HEIGHT - 16) / 2, curr);
-                    uint32_t text_color = curr->focused ? 0xFFFFFFFF : 0xFFC0C0C0;
-                    ui_draw_string_rect(back_buffer, screen_w, screen_h, curr->x + 28, t_y, title_block_w - 34, TITLEBAR_HEIGHT, curr->title, text_color);
-                    int btn_y = t_y + (TITLEBAR_HEIGHT - 14) / 2;
-                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 20, btn_y, 16, 14, 2, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 2)); // Close
-                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 38, btn_y, 16, 14, 1, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 8)); // Maximize
-                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 56, btn_y, 16, 14, 0, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 4)); // Minimize
-                    int cx_left = curr->x - 2;
-                    int cx_top = curr->y - 2;
-                    int cx_w = curr->w + 4;
-                    int cx_h = curr->h + 4;
-                    
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF676767);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF676767);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_left + cx_w - 2, 0xFF676767);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_top + cx_h - 2, 0xFF676767);
 
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top + cx_h - 1, cx_left + cx_w - 1, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 1, cx_top, cx_top + cx_h - 1, 0xFFFFFFFF);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + cx_h - 2, cx_left + cx_w - 2, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 2, cx_top + 1, cx_top + cx_h - 2, 0xFFFFFFFF);
+                        for (int py = t_y; py < t_y + t_h; py++) {
+                            if (py < band_y_start || py >= band_y_end || py < 0 || py >= screen_h) continue;
+                            int start_x = t_x < 0 ? 0 : t_x;
+                            int end_x = (t_x + copy_w) > screen_w ? screen_w : (t_x + copy_w);
+                            if (start_x >= end_x) continue;
+                            uint32_t *dst = &back_buffer[py * screen_w + start_x];
+                            const uint32_t *src = &grad_buf[start_x - t_x];
+                            memcpy(dst, src, (size_t)(end_x - start_x) * sizeof(uint32_t));
+                        }
+                        
+                        int line_start_x = t_x + title_block_w + 4;
+                        int line_end_x = t_x + t_w - 60;
+                        uint32_t line_color = curr->focused ? active_titlebar_top : inactive_titlebar_top;
+                        if (line_start_x < line_end_x) {
+                            for (int offset = 3; offset <= 15; offset += 2) {
+                                draw_line_h_safe(back_buffer, screen_w, screen_h, line_start_x, t_y + offset, line_end_x, line_color);
+                            }
+                        }
+                        draw_decorations_icon(back_buffer, screen_w, screen_h, curr->x + 6, t_y + (TITLEBAR_HEIGHT - 16) / 2, curr);
+                        uint32_t text_color = curr->focused ? 0xFFFFFFFF : 0xFFC0C0C0;
+                        ui_draw_string_rect(back_buffer, screen_w, screen_h, curr->x + 28, t_y, title_block_w - 34, TITLEBAR_HEIGHT, curr->title, text_color);
+                        int btn_y = t_y + (TITLEBAR_HEIGHT - 14) / 2;
+                        draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 20, btn_y, 16, 14, 2, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 2));
+                        draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 38, btn_y, 16, 14, 1, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 8));
+                        draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 56, btn_y, 16, 14, 0, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 4));
+                        int cx_left = curr->x - 2;
+                        int cx_top = curr->y - 2;
+                        int cx_w = curr->w + 4;
+                        int cx_h = curr->h + 4;
+                        
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF676767);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF676767);
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_left + cx_w - 2, 0xFF676767);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_top + cx_h - 2, 0xFF676767);
+
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top + cx_h - 1, cx_left + cx_w - 1, 0xFFFFFFFF);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 1, cx_top, cx_top + cx_h - 1, 0xFFFFFFFF);
+                        draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + cx_h - 2, cx_left + cx_w - 2, 0xFFFFFFFF);
+                        draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 2, cx_top + 1, cx_top + cx_h - 2, 0xFFFFFFFF);
+                    }
                 }
 
                 // Blend client's mapped shm pixels onto backbuffer
-                uint32_t *blend_pixels = (curr->resize_preview_active && resize_preview_pixels) ? resize_preview_pixels : curr->pixels;
-                if (blend_pixels) {
-                    surface_t temp = *curr;
-                    temp.pixels = blend_pixels;
-                    if (blend_pixels == resize_preview_pixels) {
-                        temp.buffer_w = temp.w;
-                        temp.buffer_h = temp.h;
-                    }
-                    if (partial_render) {
-                        int ix = 0, iy = 0, iw = 0, ih = 0;
-                        if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
-                                           render_x, render_y, render_w, render_h,
-                                           &ix, &iy, &iw, &ih)) {
-                            blit_surface_pixels(&temp, ix, iy, iw, ih);
+                if (curr->y + (int)curr->h > band_y_start && curr->y < band_y_end) {
+                    uint32_t *blend_pixels = (curr->resize_preview_active && resize_preview_pixels) ? resize_preview_pixels : curr->pixels;
+                    if (blend_pixels) {
+                        surface_t temp = *curr;
+                        temp.pixels = blend_pixels;
+                        if (blend_pixels == resize_preview_pixels) {
+                            temp.buffer_w = temp.w;
+                            temp.buffer_h = temp.h;
                         }
-                    } else {
-                        blit_surface_pixels(&temp, curr->x, curr->y, (int)curr->w, (int)curr->h);
+                        if (partial_render) {
+                            int ix = 0, iy = 0, iw = 0, ih = 0;
+                            if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
+                                               render_x, render_y, render_w, render_h,
+                                               &ix, &iy, &iw, &ih)) {
+                                blit_surface_pixels_band(&temp, ix, iy, iw, ih, band_y_start, band_y_end);
+                            }
+                        } else {
+                            blit_surface_pixels_band(&temp, curr->x, curr->y, (int)curr->w, (int)curr->h, band_y_start, band_y_end);
+                        }
                     }
                 }
             }
             curr = curr->next;
         }
     }
+}
 
-    // 1. Save clean pixels under the new cursor from back_buffer
-    uint32_t saved_pixels[12 * 19];
-    for (int y = 0; y < cursor_h; y++) {
-        int py = my + y;
-        uint32_t *bb_row = (py >= 0 && py < screen_h) ? &back_buffer[py * screen_w] : NULL;
-        for (int x = 0; x < cursor_w; x++) {
-            int px = mx + x;
-            if (bb_row && px >= 0 && px < screen_w) {
-                saved_pixels[y * cursor_w + x] = bb_row[px];
-            } else {
-                saved_pixels[y * cursor_w + x] = 0xFF1E1E2E;
-            }
+static void *compositor_worker_loop(void *arg) {
+    int id = (int)(intptr_t)arg;
+    while (worker_threads_active) {
+        pthread_barrier_wait(&start_barrier);
+        if (worker_threads_exit) break;
+
+        compositor_render_band_pixels(worker_data[id].y_start, worker_data[id].y_end);
+
+        pthread_barrier_wait(&done_barrier);
+    }
+    return NULL;
+}
+
+// Compositor Render Loop
+void compositor_composite(void) {
+    int cursor_w = 12;
+    int cursor_h = 19;
+
+    if (has_dirty_rect) {
+        mark_dirty_rect(mx, my, cursor_w, cursor_h);
+        if (cursor_visible) {
+            mark_dirty_rect(last_cursor_x, last_cursor_y, cursor_w, cursor_h);
         }
     }
 
-    // 2. Draw the cursor onto the back_buffer temporarily
+    g_render_x = 0;
+    g_render_y = 0;
+    g_render_w = screen_w;
+    g_render_h = screen_h;
+    g_partial_render = has_dirty_rect;
+
+    if (g_partial_render) {
+        g_render_x = dirty_x;
+        g_render_y = dirty_y;
+        g_render_w = dirty_w;
+        g_render_h = dirty_h;
+    }
+
+    if (compositor_threads > 1 && worker_threads_active) {
+        int band_h = screen_h / compositor_threads;
+        for (int i = 0; i < compositor_threads; i++) {
+            worker_data[i].y_start = i * band_h;
+            worker_data[i].y_end = (i == compositor_threads - 1) ? screen_h : (i + 1) * band_h;
+        }
+
+        pthread_barrier_wait(&start_barrier);
+        // Main thread composites band 0
+        compositor_render_band_pixels(worker_data[0].y_start, worker_data[0].y_end);
+        pthread_barrier_wait(&done_barrier);
+    } else {
+        // Single-core fallback: 100% inline execution on main thread
+        compositor_render_band_pixels(0, screen_h);
+    }
+
+    // Draw cursor onto back_buffer
     draw_cursor(back_buffer, screen_w, screen_h, mx, my);
 
-    // 3. Blit backbuffer directly to hardware framebuffer mapped address space
+    // Blit backbuffer directly to hardware framebuffer mapped address space
     if (has_dirty_rect) {
         copy_box_to_fb(dirty_x, dirty_y, dirty_w, dirty_h);
         present_framebuffer(dirty_x, dirty_y, dirty_w, dirty_h);
@@ -1979,25 +2114,10 @@ void compositor_composite(void) {
         present_framebuffer(0, 0, screen_w, screen_h);
     }
 
-    // 4. Restore the clean pixels back to back_buffer
-    for (int y = 0; y < cursor_h; y++) {
-        int py = my + y;
-        if (py >= 0 && py < screen_h) {
-            uint32_t *bb_row = &back_buffer[py * screen_w];
-            for (int x = 0; x < cursor_w; x++) {
-                int px = mx + x;
-                if (px >= 0 && px < screen_w) {
-                    bb_row[px] = saved_pixels[y * cursor_w + x];
-                }
-            }
-        }
-    }
-
-    // 5. Update state
+    // Update state
     last_cursor_x = mx;
     last_cursor_y = my;
     cursor_visible = true;
-    
 }
 
 // Client IPC message handlers
@@ -2501,6 +2621,30 @@ int main(int argc, char *argv[]) {
     // Initial mouse center coordinates
     mx = screen_w / 2;
     my = screen_h / 2;
+
+    // VFS CPU core count detection and compositor thread pool initialization
+    long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online_cpus > 1) {
+        compositor_threads = (int)online_cpus;
+        if (compositor_threads > 8) compositor_threads = 8;
+    } else {
+        compositor_threads = 1;
+    }
+
+    printf("Nova Compositor: Online CPUs: %ld via VFS /proc/cpuinfo. Mode: %s (%d thread%s)\n",
+           online_cpus, compositor_threads > 1 ? "Multithreaded Parallel Banding" : "Single-Core Inline Fallback",
+           compositor_threads, compositor_threads > 1 ? "s" : "");
+
+    if (compositor_threads > 1) {
+        pthread_barrier_init(&start_barrier, NULL, compositor_threads);
+        pthread_barrier_init(&done_barrier, NULL, compositor_threads);
+        worker_threads_active = true;
+
+        for (int i = 1; i < compositor_threads; i++) {
+            worker_data[i].thread_id = i;
+            pthread_create(&worker_threads[i], NULL, compositor_worker_loop, (void *)(intptr_t)i);
+        }
+    }
 
     // Autostart shell elements (Shelf, Topbar, Launch list)
     for (int i = 0; i < autostart_count; i++) {

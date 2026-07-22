@@ -50,6 +50,10 @@ static int send_all(int fd, const void *buf, size_t size) {
     size_t written = 0;
     while (written < size) {
         ssize_t rc = send(fd, (const char *)buf + written, size - written, 0);
+        if (rc < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+            usleep(1000);
+            continue;
+        }
         if (rc <= 0) return -1;
         written += rc;
     }
@@ -60,6 +64,10 @@ static int recv_all(int fd, void *buf, size_t size) {
     size_t read_bytes = 0;
     while (read_bytes < size) {
         ssize_t rc = recv(fd, (char *)buf + read_bytes, size - read_bytes, 0);
+        if (rc < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+            usleep(1000);
+            continue;
+        }
         if (rc <= 0) return -1;
         read_bytes += rc;
     }
@@ -86,7 +94,7 @@ static int send_frame(int fd, uint32_t type, const void *payload, uint32_t size)
     return 0;
 }
 
-static int recv_frame(int fd, NovaFrameHeader *header_out, void *payload_out, uint32_t max_size) {
+static int recv_dynamic_frame(int fd, NovaFrameHeader *header_out, uint8_t **payload_out, uint32_t *payload_len_out, uint8_t *stack_buf, uint32_t stack_buf_size) {
     if (recv_all(fd, header_out, sizeof(NovaFrameHeader)) < 0) {
         return -1;
     }
@@ -95,18 +103,44 @@ static int recv_frame(int fd, NovaFrameHeader *header_out, void *payload_out, ui
         return -1;
     }
 
-    if (header_out->payload_size > 0) {
-        uint32_t to_read = header_out->payload_size;
-        if (to_read > max_size) to_read = max_size;
+    uint32_t sz = header_out->payload_size;
+    if (sz == 0) {
+        *payload_out = NULL;
+        *payload_len_out = 0;
+        return 0;
+    }
 
-        if (recv_all(fd, payload_out, to_read) < 0) {
+    if (sz > 64 * 1024 * 1024) {
+        return -1;
+    }
+
+    if (sz <= stack_buf_size) {
+        *payload_out = stack_buf;
+        *payload_len_out = sz;
+        if (recv_all(fd, stack_buf, sz) < 0) {
+            return -1;
+        }
+    } else {
+        uint8_t *heap_buf = malloc(sz);
+        if (!heap_buf) return -1;
+        *payload_out = heap_buf;
+        *payload_len_out = sz;
+        if (recv_all(fd, heap_buf, sz) < 0) {
+            free(heap_buf);
+            *payload_out = NULL;
             return -1;
         }
     }
     return 0;
 }
 
-#define MAX_QUEUED_EVENTS 64
+static void free_dynamic_payload(uint8_t *payload, uint8_t *stack_buf) {
+    if (payload && payload != stack_buf) {
+        free(payload);
+    }
+}
+
+#define MAX_QUEUED_EVENTS 512
 static NovaEvent event_queue[MAX_QUEUED_EVENTS];
 static int event_queue_head = 0;
 static int event_queue_tail = 0;
@@ -129,6 +163,7 @@ static bool pop_event(NovaEvent *ev) {
 static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, uint32_t payload_size, NovaEvent *event_out) {
     memset(event_out, 0, sizeof(*event_out));
     event_out->type = msg_type;
+    if (!buffer) return;
     
     switch (msg_type) {
         case EVT_KEY: {
@@ -224,7 +259,6 @@ static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, uin
             break;
         }
         case EVT_THEME_UPDATE: {
-            // Re-broadcast theme update inside process
             break;
         }
         default:
@@ -235,24 +269,29 @@ static void parse_event_from_frame(uint32_t msg_type, const uint8_t *buffer, uin
 static int recv_sync_reply(int fd, uint32_t expected_type, void *payload_out, uint32_t max_size) {
     while (1) {
         NovaFrameHeader header;
-        uint8_t buffer[512];
-        if (recv_frame(fd, &header, buffer, sizeof(buffer)) < 0) {
+        uint8_t stack_buf[512];
+        uint8_t *payload = NULL;
+        uint32_t payload_len = 0;
+
+        if (recv_dynamic_frame(fd, &header, &payload, &payload_len, stack_buf, sizeof(stack_buf)) < 0) {
             return -1;
         }
 
         if (header.msg_type == expected_type) {
-            if (header.payload_size > 0 && payload_out) {
-                uint32_t copy_sz = header.payload_size;
-                if (copy_sz > max_size) copy_sz = max_size;
-                memcpy(payload_out, buffer, copy_sz);
+            if (payload_len > 0 && payload_out) {
+                uint32_t copy_sz = payload_len < max_size ? payload_len : max_size;
+                memcpy(payload_out, payload, copy_sz);
             }
+            free_dynamic_payload(payload, stack_buf);
             return 0;
         }
 
-        // Parse and queue the out-of-order event
+        // Parse and queue out-of-order event
         NovaEvent ev;
-        parse_event_from_frame(header.msg_type, buffer, header.payload_size, &ev);
+        parse_event_from_frame(header.msg_type, payload, payload_len, &ev);
         push_event(&ev);
+
+        free_dynamic_payload(payload, stack_buf);
     }
 }
 
@@ -407,12 +446,16 @@ int nova_poll_event(int fd, NovaEvent *event_out) {
     }
 
     NovaFrameHeader header;
-    uint8_t buffer[512];
-    if (recv_frame(fd, &header, buffer, sizeof(buffer)) < 0) {
+    uint8_t stack_buf[512];
+    uint8_t *payload = NULL;
+    uint32_t payload_len = 0;
+
+    if (recv_dynamic_frame(fd, &header, &payload, &payload_len, stack_buf, sizeof(stack_buf)) < 0) {
         return -1;
     }
 
-    parse_event_from_frame(header.msg_type, buffer, header.payload_size, event_out);
+    parse_event_from_frame(header.msg_type, payload, payload_len, event_out);
+    free_dynamic_payload(payload, stack_buf);
     return 0;
 }
 

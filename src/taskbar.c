@@ -456,16 +456,21 @@ static bool load_file_to_buffer(const char *path, unsigned char **out_buf, size_
         return false;
     }
 
-    size_t read_size = fread(buf, 1, (size_t)size, f);
+    size_t total_rd = 0;
+    while (total_rd < (size_t)size) {
+        size_t rd = fread(buf + total_rd, 1, (size_t)size - total_rd, f);
+        if (rd == 0) break;
+        total_rd += rd;
+    }
     fclose(f);
 
-    if (read_size != (size_t)size) {
+    if (total_rd == 0) {
         free(buf);
         return false;
     }
 
     *out_buf = buf;
-    *out_size = (size_t)size;
+    *out_size = total_rd;
     return true;
 }
 
@@ -547,6 +552,18 @@ static bool load_scaled_image(const char *path, int target_w, int target_h, imag
     return true;
 }
 
+static void clone_image(const image_t *src, image_t *dst) {
+    free_image(dst);
+    if (!src || !src->pixels || src->w <= 0 || src->h <= 0) return;
+    dst->w = src->w;
+    dst->h = src->h;
+    size_t sz = (size_t)src->w * (size_t)src->h * sizeof(uint32_t);
+    dst->pixels = malloc(sz);
+    if (dst->pixels) {
+        memcpy(dst->pixels, src->pixels, sz);
+    }
+}
+
 static void draw_image(uint32_t *dest, int dest_w, int dest_h, int x, int y, const image_t *img) {
     if (!dest || !img || !img->pixels) return;
     ui_blend_pixels(dest, dest_w, dest_h, x, y, img->pixels, img->w, img->h, 1.0f);
@@ -573,7 +590,7 @@ static bool contains_nocase(const char *haystack, const char *needle) {
 static const app_entry_t *find_app_for_window(const char *title) {
     if (!title || !title[0]) return NULL;
     for (int i = 0; i < app_count; i++) {
-        if (contains_nocase(title, apps[i].display_name)) {
+        if (contains_nocase(title, apps[i].display_name) || contains_nocase(apps[i].display_name, title)) {
             return &apps[i];
         }
     }
@@ -604,6 +621,15 @@ static const app_entry_t *find_app_for_window(const char *title) {
         }
     }
 
+    // 4. First word matching
+    for (int i = 0; i < app_count; i++) {
+        char word[64] = "";
+        sscanf(apps[i].display_name, "%63s", word);
+        if (strlen(word) >= 3 && (contains_nocase(title, word) || contains_nocase(word, title))) {
+            return &apps[i];
+        }
+    }
+
     return NULL;
 }
 
@@ -612,11 +638,12 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
 
     bool become_active = (state_flags & 1) != 0;
     
+    const app_entry_t *app = NULL;
     char resolved_path[256] = "";
     if (icon_path && icon_path[0]) {
         copy_string(resolved_path, sizeof(resolved_path), icon_path);
     } else {
-        const app_entry_t *app = find_app_for_window(title);
+        app = find_app_for_window(title);
         if (app && app->icon_path[0]) {
             copy_string(resolved_path, sizeof(resolved_path), app->icon_path);
         } else {
@@ -637,7 +664,9 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
                 }
                 last_active_surface_id = surface_id;
             }
-            if (resolved_path[0]) {
+            if (app && app->icon_img.pixels) {
+                clone_image(&app->icon_img, &windows[i].icon_img);
+            } else if (resolved_path[0]) {
                 free_image(&windows[i].icon_img);
                 load_scaled_image(resolved_path, 16, 16, &windows[i].icon_img);
             }
@@ -657,7 +686,9 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
         windows[window_count].state_flags = state_flags;
         windows[window_count].active = become_active;
         memset(&windows[window_count].icon_img, 0, sizeof(image_t));
-        if (resolved_path[0]) {
+        if (app && app->icon_img.pixels) {
+            clone_image(&app->icon_img, &windows[window_count].icon_img);
+        } else if (resolved_path[0]) {
             load_scaled_image(resolved_path, 16, 16, &windows[window_count].icon_img);
         }
         window_count++;
@@ -776,8 +807,11 @@ static void update_window_focus(uint32_t surface_id, uint32_t state_flags) {
 }
 
 static void update_window_title(uint32_t surface_id, const char *title, const char *icon_path) {
+    if (!title || !title[0]) return;
+    bool found = false;
     for (int i = 0; i < window_count; i++) {
         if (windows[i].surface_id == surface_id) {
+            found = true;
             char resolved_path[256] = "";
             if (icon_path && icon_path[0]) {
                 copy_string(resolved_path, sizeof(resolved_path), icon_path);
@@ -790,18 +824,22 @@ static void update_window_title(uint32_t surface_id, const char *title, const ch
                 }
             }
 
-            if (strcmp(windows[i].title, title) != 0 || !windows[i].icon_img.pixels) {
-                copy_string(windows[i].title, sizeof(windows[i].title), title);
+            copy_string(windows[i].title, sizeof(windows[i].title), title);
+            if (resolved_path[0]) {
                 free_image(&windows[i].icon_img);
                 load_scaled_image(resolved_path, 16, 16, &windows[i].icon_img);
-                
-                if (!icon_path || strcmp(icon_path, resolved_path) != 0) {
-                    nova_set_icon(fd, surface_id, resolved_path);
-                }
-                bar_dirty = true;
             }
+            
+            if (resolved_path[0] && (!icon_path || !icon_path[0])) {
+                nova_set_icon(fd, surface_id, resolved_path);
+            }
+            bar_dirty = true;
             break;
         }
+    }
+
+    if (!found) {
+        add_window(surface_id, title, 1, icon_path);
     }
 }
 
@@ -925,19 +963,21 @@ static bool parse_exec_command(const char *raw_exec,
 static bool load_desktop_icon(const char *icon, image_t *out) {
     if (!icon || !icon[0] || !out) return false;
 
-    if (icon[0] == '/' || strchr(icon, '/')) {
-        return load_scaled_image(icon, 16, 16, out);
-    }
+    if (load_scaled_image(icon, 16, 16, out)) return true;
 
-    const char *ext = str_has_suffix(icon, ".png") ? "" : ".png";
+    const char *basename = strrchr(icon, '/');
+    if (basename) basename++;
+    else basename = icon;
+
+    const char *ext = str_has_suffix(basename, ".png") ? "" : ".png";
     char path[256];
-    snprintf(path, sizeof(path), "/Library/Icons/serenityicons/16x16/%s%s", icon, ext);
+    snprintf(path, sizeof(path), "/Library/Icons/serenityicons/16x16/%s%s", basename, ext);
     if (load_scaled_image(path, 16, 16, out)) return true;
 
-    snprintf(path, sizeof(path), "/Library/Icons/serenityicons/32x32/%s%s", icon, ext);
+    snprintf(path, sizeof(path), "/Library/Icons/serenityicons/32x32/%s%s", basename, ext);
     if (load_scaled_image(path, 16, 16, out)) return true;
 
-    snprintf(path, sizeof(path), "/Library/Icons/boredos/%s%s", icon, ext);
+    snprintf(path, sizeof(path), "/Library/Icons/boredos/%s%s", basename, ext);
     return load_scaled_image(path, 16, 16, out);
 }
 
@@ -1086,32 +1126,39 @@ static bool load_desktop_file(const char *path, const char *desktop_file) {
     return add_desktop_application(desktop_file, name, exec, icon, terminal, category);
 }
 
+static void scan_desktop_dir(const char *dir_path) {
+    FAT32_FileInfo files[64];
+    int file_count = sys_list(dir_path, files, 64);
+    if (file_count <= 0) return;
+
+    for (int j = 0; j < file_count; j++) {
+        if (files[j].is_directory) continue;
+        if (!str_has_suffix(files[j].name, DESKTOP_SUFFIX)) continue;
+
+        char desktop_full_path[256];
+        snprintf(desktop_full_path, sizeof(desktop_full_path), "%s/%s", dir_path, files[j].name);
+
+        load_desktop_file(desktop_full_path, files[j].name);
+    }
+}
+
 static void load_applications(void) {
     clear_applications();
 
+    scan_desktop_dir("/usr/share/applications");
+    scan_desktop_dir("/Library/Applications");
+    scan_desktop_dir("/Library/AppData");
+
     FAT32_FileInfo apps_dirs[128];
     int dir_count = sys_list("/Library/AppData", apps_dirs, 128);
-    if (dir_count < 0) return;
+    if (dir_count > 0) {
+        for (int i = 0; i < dir_count; i++) {
+            if (!apps_dirs[i].is_directory) continue;
+            if (strcmp(apps_dirs[i].name, ".") == 0 || strcmp(apps_dirs[i].name, "..") == 0) continue;
 
-    for (int i = 0; i < dir_count; i++) {
-        if (!apps_dirs[i].is_directory) continue;
-        if (strcmp(apps_dirs[i].name, ".") == 0 || strcmp(apps_dirs[i].name, "..") == 0) continue;
-
-        char app_dir_path[256];
-        snprintf(app_dir_path, sizeof(app_dir_path), "/Library/AppData/%s", apps_dirs[i].name);
-
-        FAT32_FileInfo files[32];
-        int file_count = sys_list(app_dir_path, files, 32);
-        if (file_count < 0) continue;
-
-        for (int j = 0; j < file_count; j++) {
-            if (files[j].is_directory) continue;
-            if (!str_has_suffix(files[j].name, DESKTOP_SUFFIX)) continue;
-
-            char desktop_full_path[256];
-            snprintf(desktop_full_path, sizeof(desktop_full_path), "%s/%s", app_dir_path, files[j].name);
-
-            load_desktop_file(desktop_full_path, files[j].name);
+            char app_dir_path[256];
+            snprintf(app_dir_path, sizeof(app_dir_path), "/Library/AppData/%s", apps_dirs[i].name);
+            scan_desktop_dir(app_dir_path);
         }
     }
 }
@@ -2021,17 +2068,6 @@ int main(int argc, char *argv[]) {
 
     load_taskbar_config("/Library/AppData/org.boredos.nova/taskbar.conf", &config);
 
-    load_scaled_image(config.logo_path, 16, 16, &logo_img);
-    load_scaled_image(DEFAULT_APP_ICON_PATH, 16, 16, &app_icon_img);
-    load_scaled_image("/Library/Icons/boredos/bos.png", 16, 16, &boredos_icon_img);
-    load_scaled_image("/Library/Icons/serenityicons/16x16/app-run.png", 16, 16, &run_icon_img);
-    load_scaled_image("/Library/Icons/serenityicons/16x16/power.png", 16, 16, &exit_icon_img);
-    for (int i = 0; i < NUM_CATEGORIES; i++) {
-        load_scaled_image(category_icons[i], 16, 16, &category_icon_imgs[i]);
-    }
-
-    load_applications();
-
     fd = nova_connect(NULL);
     if (fd < 0) {
         fprintf(stderr, "Taskbar Error: Cannot connect to Nova socket\n");
@@ -2075,8 +2111,22 @@ int main(int argc, char *argv[]) {
     int bar_y = config.position_bottom ? (screen_h - TASKBAR_HEIGHT) : 0;
     nova_move_surface(fd, bar_surf_id, 0, bar_y);
 
+    load_scaled_image(config.logo_path, 16, 16, &logo_img);
+    load_scaled_image(DEFAULT_APP_ICON_PATH, 16, 16, &app_icon_img);
+    load_scaled_image("/Library/Icons/boredos/bos.png", 16, 16, &boredos_icon_img);
+    load_scaled_image("/Library/Icons/serenityicons/16x16/app-run.png", 16, 16, &run_icon_img);
+    load_scaled_image("/Library/Icons/serenityicons/16x16/power.png", 16, 16, &exit_icon_img);
+    for (int i = 0; i < NUM_CATEGORIES; i++) {
+        load_scaled_image(category_icons[i], 16, 16, &category_icon_imgs[i]);
+    }
+
+    load_applications();
+
     window_count = 0;
     nova_query_windows(fd);
+
+    bar_dirty = true;
+    draw_taskbar();
 
     struct pollfd pfd;
     pfd.fd = fd;
@@ -2084,6 +2134,7 @@ int main(int argc, char *argv[]) {
 
     uint32_t last_clock_tick = 0;
     bar_dirty = true;
+
 
     while (1) {
         int timeout = 200;

@@ -1,6 +1,7 @@
 #include "novaproto.h"
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <poll.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
@@ -50,8 +51,12 @@ static int send_all(int fd, const void *buf, size_t size) {
     size_t written = 0;
     while (written < size) {
         ssize_t rc = send(fd, (const char *)buf + written, size - written, 0);
-        if (rc < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(1000);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            int pr = poll(&pfd, 1, 200);
+            if (pr < 0 && errno == EINTR) continue;
+            if (pr <= 0) return -1;
             continue;
         }
         if (rc <= 0) return -1;
@@ -64,8 +69,12 @@ static int recv_all(int fd, void *buf, size_t size) {
     size_t read_bytes = 0;
     while (read_bytes < size) {
         ssize_t rc = recv(fd, (char *)buf + read_bytes, size - read_bytes, 0);
-        if (rc < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(1000);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd pfd = { .fd = fd, .events = POLLIN };
+            int pr = poll(&pfd, 1, 200);
+            if (pr < 0 && errno == EINTR) continue;
+            if (pr <= 0) return -1; 
             continue;
         }
         if (rc <= 0) return -1;

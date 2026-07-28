@@ -3,7 +3,6 @@
 #define STBI_NO_STDIO
 #define STBI_NO_LINEAR
 #define STBI_NO_HDR
-#define STBI_NO_SIMD
 #define STBI_NO_PSD
 #define STBI_NO_PIC
 #define STBI_NO_PNM
@@ -625,10 +624,12 @@ STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const ch
 
 
 #ifndef _MSC_VER
-   #ifdef __cplusplus
-   #define stbi_inline inline
+   #if defined(__GNUC__) || defined(__clang__)
+      #define stbi_inline __attribute__((always_inline)) static inline
+   #elif defined(__cplusplus)
+      #define stbi_inline inline
    #else
-   #define stbi_inline
+      #define stbi_inline inline
    #endif
 #else
    #define stbi_inline __forceinline

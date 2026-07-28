@@ -67,6 +67,9 @@ typedef struct {
     int esc_state;
     int esc_params[8];
     int esc_num_params;
+
+    uint32_t *back_buffer;
+    int back_buffer_size;
 } term_t;
 
 typedef struct {
@@ -735,9 +738,22 @@ static void draw_cursor_fast(struct NtkPainter *p, term_t *term) {
 static void on_canvas_draw(NtkCanvas *canvas, NtkPainter *painter, term_t *term) {
     (void)canvas;
     
+    int total_pixels = painter->width * painter->height;
+    if (total_pixels <= 0) return;
+
+    if (!term->back_buffer || term->back_buffer_size < total_pixels) {
+        free(term->back_buffer);
+        term->back_buffer = malloc((size_t)total_pixels * sizeof(uint32_t));
+        term->back_buffer_size = total_pixels;
+    }
+    if (!term->back_buffer) return;
+
+    NtkPainter offscreen_painter = *painter;
+    offscreen_painter.buffer = term->back_buffer;
+
     uint32_t bg_color = term->bg_color;
-    for (int i = 0; i < painter->width * painter->height; i++) {
-        painter->buffer[i] = bg_color;
+    for (int i = 0; i < total_pixels; i++) {
+        term->back_buffer[i] = bg_color;
     }
 
     for (int r = 0; r < term->rows; r++) {
@@ -745,11 +761,13 @@ static void on_canvas_draw(NtkCanvas *canvas, NtkPainter *painter, term_t *term)
             term_cell_t cell = get_viewport_cell(term, r, c);
             int gx = c * cell_width;
             int gy = r * cell_height;
-            draw_cell_fast(painter, gx, gy, cell, bg_color);
+            draw_cell_fast(&offscreen_painter, gx, gy, cell, bg_color);
         }
     }
 
-    draw_cursor_fast(painter, term);
+    draw_cursor_fast(&offscreen_painter, term);
+
+    memcpy(painter->buffer, term->back_buffer, (size_t)total_pixels * sizeof(uint32_t));
 }
 
 static bool terminal_handle_event(NtkWidget *w, NtkEvent *e) {
@@ -888,7 +906,12 @@ int main(void) {
         ntk_app_destroy(app);
         return 1;
     }
+    NtkStyle *win_style = ntk_widget_get_style(win);
+    if (win_style) {
+        ntk_style_set_color(win_style, NTK_STYLE_ROLE_WINDOW_BG, dummy.bg_color);
+    }
     NtkWidget *vbox = ntk_box_new(NTK_VERTICAL, win);
+
     ntk_window_set_content(win, vbox);
 
     NtkWidget *term_widget = ntk_widget_new_with_class(vbox, &terminal_widget_class, sizeof(term_t));

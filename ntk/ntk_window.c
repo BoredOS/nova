@@ -92,6 +92,13 @@ NtkWidget* ntk_window_new(const char *title, int width, int height) {
         return NULL;
     }
 
+    {
+        NtkStyle *style = ntk_style_get_global();
+        NtkColor bg = style ? ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG) : 0xFF3C3C3C;
+        int npx = width * height;
+        for (int i = 0; i < npx; i++) inst->pixels[i] = bg;
+    }
+
     ntk_widget_set_geometry(w, NTK_RECT(0, 0, width, height));
 
     if (title) {
@@ -101,6 +108,7 @@ NtkWidget* ntk_window_new(const char *title, int width, int height) {
     ntk_app_register_window(w);
     return w;
 }
+
 
 NtkWidget* ntk_window_new_dialog(NtkWidget *parent, const char *title, int width, int height) {
     int fd = ntk_app_get_fd();
@@ -121,7 +129,7 @@ NtkWidget* ntk_window_new_dialog(NtkWidget *parent, const char *title, int width
 
     uint32_t surf_id;
     char shm_path[128];
-    if (ntk_nova_create_surface(fd, width, height, 2, 0, &surf_id, shm_path) < 0) { 
+    if (ntk_nova_create_surface(fd, width, height, 2, 0, &surf_id, shm_path) < 0) {
         free(inst->title);
         free(w);
         return NULL;
@@ -144,6 +152,15 @@ NtkWidget* ntk_window_new_dialog(NtkWidget *parent, const char *title, int width
         return NULL;
     }
 
+    {
+        NtkStyle *style = ntk_style_get_global();
+        NtkColor bg = style ? ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG) : 0xFF3C3C3C;
+        int npx = width * height;
+        for (int i = 0; i < npx; i++) inst->pixels[i] = bg;
+        NtkRect full = NTK_RECT(0, 0, width, height);
+        ntk_nova_damage_surface(fd, surf_id, 1, &full);
+    }
+
     ntk_widget_set_geometry(w, NTK_RECT(0, 0, width, height));
 
     if (title) {
@@ -153,6 +170,7 @@ NtkWidget* ntk_window_new_dialog(NtkWidget *parent, const char *title, int width
     ntk_app_register_window(w);
     return w;
 }
+
 
 void ntk_window_set_title(NtkWidget *w, const char *title) {
     NtkWindowInstance *inst = ntk_widget_get_instance_data(w);
@@ -353,9 +371,12 @@ NtkWidget* ntk_window_get_statusbar(NtkWidget *w) {
 }
 static void window_paint(NtkWidget *w, NtkPainter *p) {
     NtkWindowInstance *inst = ntk_widget_get_instance_data(w);
-    NtkStyle *style = ntk_widget_get_style(w);
-    NtkColor bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG);
-    ntk_painter_clear(p, bg);
+    if (!inst->content || !ntk_widget_is_visible(inst->content)) {
+        NtkStyle *style = ntk_widget_get_style(w);
+        NtkColor bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG);
+        ntk_painter_clear(p, bg);
+    }
+
     if (inst->menubar && ntk_widget_is_visible(inst->menubar)) {
         const NtkWidgetClass *klass = ntk_widget_get_class(inst->menubar);
         if (klass && klass->paint) klass->paint(inst->menubar, p);
@@ -429,25 +450,28 @@ static bool window_handle_event(NtkWidget *w, NtkEvent *e) {
         int nh = e->height;
         if (nw > 0 && nh > 0 && (nw != inst->width || nh != inst->height)) {
             char new_shm[128];
-            if (ntk_nova_resize_surface(ntk_app_get_fd(), inst->surface_id, (uint32_t)nw, (uint32_t)nh, new_shm) >= 0) {
-                if (inst->pixels) {
-                    munmap(inst->pixels, (size_t)(inst->width * inst->height * 4));
-                    inst->pixels = NULL;
-                }
-                strcpy(inst->shm_path, new_shm);
+            if (ntk_nova_resize_surface(ntk_app_get_fd(), inst->surface_id, (uint32_t)nw, (uint32_t)nh, new_shm) >= 0
+                && new_shm[0] != '\0') {
                 int sfd = open(new_shm, O_RDWR);
+                uint32_t *new_pixels = NULL;
                 if (sfd >= 0) {
-                    inst->pixels = mmap(NULL, (size_t)(nw * nh * 4), PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+                    new_pixels = mmap(NULL, (size_t)(nw * nh * 4), PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
                     close(sfd);
-                    if (inst->pixels == MAP_FAILED) inst->pixels = NULL;
-                } else {
-                    inst->pixels = NULL;
+                    if (new_pixels == MAP_FAILED) new_pixels = NULL;
                 }
-                inst->width = nw;
-                inst->height = nh;
-                ntk_widget_set_geometry(w, NTK_RECT(0, 0, nw, nh));
-                window_layout(w);
-                return true;
+
+                if (new_pixels) {
+                    if (inst->pixels) {
+                        munmap(inst->pixels, (size_t)(inst->width * inst->height * 4));
+                    }
+                    inst->pixels = new_pixels;
+                    strcpy(inst->shm_path, new_shm);
+                    inst->width = nw;
+                    inst->height = nh;
+                    ntk_widget_set_geometry(w, NTK_RECT(0, 0, nw, nh));
+                    window_layout(w);
+                    return true;
+                }
             }
         }
     }

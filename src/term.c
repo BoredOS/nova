@@ -13,11 +13,10 @@
 
 #include <stb_truetype.h>
 #include "utf-8.h"
-
-int sys_pty_create(void);
-int sys_pty_destroy(int pty_id);
-int sys_tty_read_out(int tty_id, char *buf, int len);
-int sys_tty_write_in(int tty_id, const char *buf, int len);
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 
 #define SPAWN_FLAG_TERMINAL     0x1
 #define SPAWN_FLAG_INHERIT_TTY  0x2
@@ -35,6 +34,7 @@ typedef struct {
 
 typedef struct {
     int pty_id;
+    int master_fd;
     int cols;
     int rows;
     int cursor_x;
@@ -439,7 +439,7 @@ static void process_char(term_t *term, uint32_t codepoint) {
             if (term->esc_params[0] == 6) {
                 char buf[32];
                 int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dR", term->cursor_y + 1, term->cursor_x + 1);
-                sys_tty_write_in(term->pty_id, buf, len);
+                write(term->master_fd, buf, len);
             }
         } else if (codepoint == 's') {
             term->saved_x = term->cursor_x;
@@ -531,30 +531,30 @@ static void on_key_press(NtkWidget *widget, NtkEvent *event, term_t *term) {
     if (mods & NTK_MOD_CTRL) {
         if (kc >= KEY_A && kc <= KEY_Z) {
             char ctrl_char = (char)(kc - KEY_A + 1);
-            sys_tty_write_in(term->pty_id, &ctrl_char, 1);
+            write(term->master_fd, &ctrl_char, 1);
             return;
         }
     }
 
     if (kc == KEY_UP) {
-        sys_tty_write_in(term->pty_id, "\x1b[A", 3);
+        write(term->master_fd, "\x1b[A", 3);
     } else if (kc == KEY_DOWN) {
-        sys_tty_write_in(term->pty_id, "\x1b[B", 3);
+        write(term->master_fd, "\x1b[B", 3);
     } else if (kc == KEY_RIGHT) {
-        sys_tty_write_in(term->pty_id, "\x1b[C", 3);
+        write(term->master_fd, "\x1b[C", 3);
     } else if (kc == KEY_LEFT) {
-        sys_tty_write_in(term->pty_id, "\x1b[D", 3);
+        write(term->master_fd, "\x1b[D", 3);
     } else if (kc == KEY_ENTER) {
-        sys_tty_write_in(term->pty_id, "\r", 1);
+        write(term->master_fd, "\r", 1);
     } else if (kc == KEY_ESCAPE) {
-        sys_tty_write_in(term->pty_id, "\x1b", 1);
+        write(term->master_fd, "\x1b", 1);
     } else if (kc == KEY_BACKSPACE) {
         char bs = 127;
-        sys_tty_write_in(term->pty_id, &bs, 1);
+        write(term->master_fd, &bs, 1);
     } else if (kc == KEY_TAB) {
-        sys_tty_write_in(term->pty_id, "\t", 1);
+        write(term->master_fd, "\t", 1);
     } else if (event->text[0] != '\0') {
-        sys_tty_write_in(term->pty_id, event->text, strlen(event->text));
+        write(term->master_fd, event->text, strlen(event->text));
     }
 }
 
@@ -820,7 +820,7 @@ static void on_pty_data(int fd, void *userdata) {
     char buf[4096];
     bool got_data = false;
     while (1) {
-        int len = sys_tty_read_out(term->pty_id, buf, sizeof(buf));
+        int len = read(term->master_fd, buf, sizeof(buf));
         if (len <= 0) break;
         got_data = true;
 
@@ -945,9 +945,9 @@ int main(void) {
 
     term->scrollback = calloc(term->scrollback_max, sizeof(term_line_t));
 
-    term->pty_id = sys_pty_create();
-    if (term->pty_id < 0) {
-        printf("Failed to create PTY\n");
+    term->master_fd = open("/dev/ptmx", O_RDWR);
+    if (term->master_fd < 0) {
+        printf("Failed to create PTY master\n");
         free(term->screen_grid);
         free(term->scrollback);
         if (font_data) free(font_data);
@@ -955,10 +955,23 @@ int main(void) {
         return 1;
     }
 
+    int pty_num = 0;
+    if (ioctl(term->master_fd, 0x80045430 /* TIOCGPTN */, &pty_num) < 0) {
+        pty_num = 0;
+    }
+    term->pty_id = 1024 + pty_num;
+
+    struct winsize ws;
+    ws.ws_row = term->rows;
+    ws.ws_col = term->cols;
+    ws.ws_xpixel = term->cols * cell_width;
+    ws.ws_ypixel = term->rows * cell_height;
+    ioctl(term->master_fd, TIOCSWINSZ, &ws);
+
     int child_pid = sys_spawn("/bin/bsh.elf", NULL, SPAWN_FLAG_TERMINAL | SPAWN_FLAG_TTY_ID, term->pty_id);
     if (child_pid <= 0) {
         printf("Failed to spawn shell /bin/bsh.elf\n");
-        sys_pty_destroy(term->pty_id);
+        close(term->master_fd);
         free(term->screen_grid);
         free(term->scrollback);
         if (font_data) free(font_data);
@@ -968,12 +981,12 @@ int main(void) {
 
     ntk_widget_set_focus(term_widget);
 
-    ntk_app_set_custom_poll_fd(term->pty_id, on_pty_data, term_widget);
+    ntk_app_set_custom_poll_fd(term->master_fd, on_pty_data, term_widget);
 
     ntk_widget_show(win);
     ntk_app_run(app);
 
-    sys_pty_destroy(term->pty_id);
+    close(term->master_fd);
     free(term->screen_grid);
     if (term->scrollback) {
         for (int i = 0; i < term->scrollback_count; i++) {
@@ -981,7 +994,6 @@ int main(void) {
         }
         free(term->scrollback);
     }
-    if (font_data) free(font_data);
     ntk_app_destroy(app);
     return 0;
 }

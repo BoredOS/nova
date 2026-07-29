@@ -625,7 +625,7 @@ STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const ch
 
 #ifndef _MSC_VER
    #if defined(__GNUC__) || defined(__clang__)
-      #define stbi_inline __attribute__((always_inline)) static inline
+      #define stbi_inline __attribute__((always_inline)) inline
    #elif defined(__cplusplus)
       #define stbi_inline inline
    #else

@@ -926,18 +926,26 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
 static NtkSize file_view_preferred_size(NtkWidget *widget) {
     FileViewData *view = ntk_widget_get_instance_data(widget);
     FileManager *manager = view->manager;
-    int width = ntk_widget_get_geometry(widget).width;
-    if (width < 560) width = 560;
+    int minimum_width = 240;
+    if (manager->view_mode == VIEW_DETAILS) minimum_width = 660;
+    else if (manager->view_mode == VIEW_LARGE_ICONS) minimum_width = 96;
+    else if (manager->view_mode == VIEW_SMALL_ICONS) minimum_width = 180;
+
+    int layout_width = ntk_widget_get_geometry(widget).width;
+    if (layout_width < minimum_width) layout_width = minimum_width;
 
     if (manager->view_mode == VIEW_DETAILS || manager->view_mode == VIEW_LIST) {
         int top = manager->view_mode == VIEW_DETAILS ? 22 : 4;
-        return NTK_SIZE(width, top + (int)manager->entry_count * 22 + 4);
+        return NTK_SIZE(minimum_width,
+                        top + (int)manager->entry_count * 22 + 4);
     }
 
-    int columns = file_view_column_count(widget, manager->view_mode);
+    int item_width = manager->view_mode == VIEW_LARGE_ICONS ? 96 : 180;
+    int columns = (layout_width - 8) / item_width;
+    if (columns < 1) columns = 1;
     int item_height = manager->view_mode == VIEW_LARGE_ICONS ? 78 : 30;
     int rows = ((int)manager->entry_count + columns - 1) / columns;
-    return NTK_SIZE(width, rows * item_height + 8);
+    return NTK_SIZE(minimum_width, rows * item_height + 8);
 }
 
 // get the time loool
@@ -1891,6 +1899,7 @@ static DirectoryTreeItem *directory_tree_find_path(FileManager *manager,
 }
 
 static void directory_tree_reset(FileManager *manager) {
+    ntk_tree_view_set_selected(manager->directory_tree, NULL);
     directory_tree_items_clear(manager);
     NtkTreeNode *root = ntk_tree_view_get_root(manager->directory_tree);
     ntk_tree_node_clear_children(root);
@@ -1904,6 +1913,7 @@ static void directory_tree_reset(FileManager *manager) {
     ntk_tree_node_set_has_children(filesystem_node, true);
     directory_tree_item_add(manager, filesystem_node, "/");
     ntk_tree_node_set_expanded(filesystem_node, true);
+    ntk_tree_view_set_selected(manager->directory_tree, filesystem_node);
 }
 
 static void directory_tree_synchronize(FileManager *manager) {
@@ -2190,6 +2200,9 @@ static bool file_manager_navigate(FileManager *manager,
     if (manager->archive_mode) directory_tree_reset(manager);
     else directory_tree_synchronize(manager);
     ntk_widget_resize_to_preferred(manager->file_view);
+    if (reason != NAVIGATION_REFRESH) {
+        ntk_scroll_area_scroll_to(manager->file_scroll, 0, 0);
+    }
     ntk_widget_repaint(manager->file_view);
     file_manager_update_status(manager);
     file_manager_update_actions(manager);

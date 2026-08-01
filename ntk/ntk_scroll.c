@@ -160,6 +160,7 @@ static void scrollbar_paint(NtkWidget *w, NtkPainter *p) {
 
     int thumb_len = (inst->page_size * track_len) / (range + inst->page_size);
     if (thumb_len < 12) thumb_len = 12;
+    if (thumb_len > track_len) thumb_len = track_len;
 
     int thumb_pos = ((inst->value - inst->min_val) * (track_len - thumb_len)) / range;
 
@@ -183,6 +184,17 @@ static bool scrollbar_handle_event(NtkWidget *w, NtkEvent *e) {
 
     int range = inst->max_val - inst->min_val;
 
+    if (e->type == NTK_EVENT_MOUSE_RELEASE) {
+        inst->btn1_pressed = false;
+        inst->btn2_pressed = false;
+        inst->dragging = false;
+        ntk_widget_repaint(w);
+        return true;
+    }
+
+    // An always-visible scrollbar can legitimately have nothing to scroll.
+    if (range <= 0) return e->type == NTK_EVENT_MOUSE_PRESS;
+
     if (e->type == NTK_EVENT_MOUSE_PRESS) {
         NtkPoint p = e->mouse_pos;
         int mouse_coord = (inst->orientation == NTK_VERTICAL) ? p.y : p.x;
@@ -196,8 +208,10 @@ static bool scrollbar_handle_event(NtkWidget *w, NtkEvent *e) {
             ntk_scrollbar_set_value(w, inst->value + 16);
         } else {
             int track_len = max_coord - 2 * btn_size;
+            if (track_len <= 0) return true;
             int thumb_len = (inst->page_size * track_len) / (range + inst->page_size);
             if (thumb_len < 12) thumb_len = 12;
+            if (thumb_len > track_len) thumb_len = track_len;
             int thumb_pos = ((inst->value - inst->min_val) * (track_len - thumb_len)) / range;
 
             int thumb_start = btn_size + thumb_pos;
@@ -215,18 +229,14 @@ static bool scrollbar_handle_event(NtkWidget *w, NtkEvent *e) {
         }
         ntk_widget_repaint(w);
         return true;
-    } else if (e->type == NTK_EVENT_MOUSE_RELEASE) {
-        inst->btn1_pressed = false;
-        inst->btn2_pressed = false;
-        inst->dragging = false;
-        ntk_widget_repaint(w);
-        return true;
     } else if (e->type == NTK_EVENT_MOUSE_MOVE && inst->dragging) {
         int mouse_delta = (inst->orientation == NTK_VERTICAL) ? (e->mouse_pos.y - inst->drag_start_pos.y) : (e->mouse_pos.x - inst->drag_start_pos.x);
         int max_coord = (inst->orientation == NTK_VERTICAL) ? geom.height : geom.width;
         int track_len = max_coord - 2 * btn_size;
+        if (track_len <= 0) return true;
         int thumb_len = (inst->page_size * track_len) / (range + inst->page_size);
         if (thumb_len < 12) thumb_len = 12;
+        if (thumb_len > track_len) thumb_len = track_len;
 
         int scrollable_len = track_len - thumb_len;
         if (scrollable_len > 0) {
@@ -256,7 +266,21 @@ static void viewport_paint(NtkWidget *w, NtkPainter *p) {
     NtkRect geom = ntk_widget_get_geometry(w);
     NtkPoint origin = ntk_widget_map_to_global(w, NTK_POINT(0, 0));
 
+    bool had_clip = ntk_painter_has_clip(p);
+    NtkRect previous_clip = ntk_painter_get_clip_rect(p);
     NtkRect clip = NTK_RECT(origin.x, origin.y, geom.width, geom.height);
+    if (had_clip) {
+        int right = clip.x + clip.width;
+        int bottom = clip.y + clip.height;
+        int previous_right = previous_clip.x + previous_clip.width;
+        int previous_bottom = previous_clip.y + previous_clip.height;
+        if (clip.x < previous_clip.x) clip.x = previous_clip.x;
+        if (clip.y < previous_clip.y) clip.y = previous_clip.y;
+        if (right > previous_right) right = previous_right;
+        if (bottom > previous_bottom) bottom = previous_bottom;
+        clip.width = right > clip.x ? right - clip.x : 0;
+        clip.height = bottom > clip.y ? bottom - clip.y : 0;
+    }
     ntk_painter_set_clip_rect(p, clip);
 
     int count = ntk_widget_get_child_count(w);
@@ -268,7 +292,8 @@ static void viewport_paint(NtkWidget *w, NtkPainter *p) {
         }
     }
 
-    ntk_painter_clear_clip(p);
+    if (had_clip) ntk_painter_set_clip_rect(p, previous_clip);
+    else ntk_painter_clear_clip(p);
 }
 typedef struct {
     NtkWidget      *viewport;
@@ -284,6 +309,7 @@ typedef struct {
 static void scroll_area_paint(NtkWidget *w, NtkPainter *p);
 static void scroll_area_layout(NtkWidget *w);
 static NtkSize scroll_area_preferred_size(NtkWidget *w);
+static bool scroll_area_handle_event(NtkWidget *w, NtkEvent *e);
 static void scroll_area_destroy(NtkWidget *w);
 
 static const NtkWidgetClass scroll_area_class = {
@@ -291,7 +317,7 @@ static const NtkWidgetClass scroll_area_class = {
     .paint          = scroll_area_paint,
     .layout         = scroll_area_layout,
     .preferred_size = scroll_area_preferred_size,
-    .handle_event   = NULL,
+    .handle_event   = scroll_area_handle_event,
     .destroy        = scroll_area_destroy
 };
 
@@ -388,6 +414,27 @@ static void scroll_area_paint(NtkWidget *w, NtkPainter *p) {
     }
 }
 
+static bool scroll_area_handle_event(NtkWidget *w, NtkEvent *e) {
+    if (e->type != NTK_EVENT_SCROLL) return false;
+
+    NtkScrollAreaInstance *inst = ntk_widget_get_instance_data(w);
+    bool handled = false;
+
+    if (ntk_widget_is_visible(inst->v_scrollbar) && e->scroll_dy != 0) {
+        int value = ntk_scrollbar_get_value(inst->v_scrollbar);
+        ntk_scrollbar_set_value(inst->v_scrollbar,
+                                value - e->scroll_dy * 16);
+        handled = true;
+    }
+    if (ntk_widget_is_visible(inst->h_scrollbar) && e->scroll_dx != 0) {
+        int value = ntk_scrollbar_get_value(inst->h_scrollbar);
+        ntk_scrollbar_set_value(inst->h_scrollbar,
+                                value + e->scroll_dx * 16);
+        handled = true;
+    }
+    return handled;
+}
+
 static void scroll_area_layout(NtkWidget *w) {
     NtkScrollAreaInstance *inst = ntk_widget_get_instance_data(w);
     NtkRect geom = ntk_widget_get_geometry(w);
@@ -395,6 +442,45 @@ static void scroll_area_layout(NtkWidget *w) {
     NtkSize content_pref = inst->content ? ntk_widget_get_preferred_size(inst->content) : NTK_SIZE_ZERO;
 
     int sb_width = 16;
+
+    // Some views wrap their contents according to the viewport width. Give them
+    // that width before deciding the final scrollbar ranges.
+    for (int pass = 0; pass < 3 && inst->content; ++pass) {
+        bool measure_v = (inst->v_policy == NTK_SCROLL_ALWAYS) ||
+                         (inst->v_policy == NTK_SCROLL_AUTO &&
+                          content_pref.height > geom.height);
+        bool measure_h = (inst->h_policy == NTK_SCROLL_ALWAYS) ||
+                         (inst->h_policy == NTK_SCROLL_AUTO &&
+                          content_pref.width > geom.width);
+        if (measure_v && !measure_h && inst->h_policy == NTK_SCROLL_AUTO &&
+            content_pref.width > geom.width - sb_width) {
+            measure_h = true;
+        }
+        if (measure_h && !measure_v && inst->v_policy == NTK_SCROLL_AUTO &&
+            content_pref.height > geom.height - sb_width) {
+            measure_v = true;
+        }
+
+        int measure_width = geom.width - (measure_v ? sb_width : 0);
+        int measure_height = geom.height - (measure_h ? sb_width : 0);
+        if (measure_width < 1) measure_width = 1;
+        if (measure_height < 1) measure_height = 1;
+        int content_width = content_pref.width > measure_width
+                                ? content_pref.width : measure_width;
+        int content_height = content_pref.height > measure_height
+                                 ? content_pref.height : measure_height;
+        ntk_widget_set_geometry(inst->content,
+                                NTK_RECT(geom.x - inst->offset_x,
+                                         geom.y - inst->offset_y,
+                                         content_width, content_height));
+
+        NtkSize measured = ntk_widget_get_preferred_size(inst->content);
+        if (measured.width == content_pref.width &&
+            measured.height == content_pref.height) {
+            break;
+        }
+        content_pref = measured;
+    }
 
     bool need_v = (inst->v_policy == NTK_SCROLL_ALWAYS) || 
                   (inst->v_policy == NTK_SCROLL_AUTO && content_pref.height > geom.height);
@@ -410,6 +496,8 @@ static void scroll_area_layout(NtkWidget *w) {
 
     int vp_w = geom.width - (need_v ? sb_width : 0);
     int vp_h = geom.height - (need_h ? sb_width : 0);
+    if (vp_w < 1) vp_w = 1;
+    if (vp_h < 1) vp_h = 1;
 
     ntk_widget_set_geometry(inst->viewport, NTK_RECT(geom.x, geom.y, vp_w, vp_h));
 
@@ -417,18 +505,22 @@ static void scroll_area_layout(NtkWidget *w) {
         ntk_widget_show(inst->v_scrollbar);
         ntk_widget_set_geometry(inst->v_scrollbar, NTK_RECT(geom.x + vp_w, geom.y, sb_width, vp_h));
         ntk_scrollbar_set_range(inst->v_scrollbar, 0, content_pref.height - vp_h, vp_h);
+        inst->offset_y = ntk_scrollbar_get_value(inst->v_scrollbar);
     } else {
         ntk_widget_hide(inst->v_scrollbar);
         inst->offset_y = 0;
+        ntk_scrollbar_set_value(inst->v_scrollbar, 0);
     }
 
     if (need_h) {
         ntk_widget_show(inst->h_scrollbar);
         ntk_widget_set_geometry(inst->h_scrollbar, NTK_RECT(geom.x, geom.y + vp_h, vp_w, sb_width));
         ntk_scrollbar_set_range(inst->h_scrollbar, 0, content_pref.width - vp_w, vp_w);
+        inst->offset_x = ntk_scrollbar_get_value(inst->h_scrollbar);
     } else {
         ntk_widget_hide(inst->h_scrollbar);
         inst->offset_x = 0;
+        ntk_scrollbar_set_value(inst->h_scrollbar, 0);
     }
 
     if (inst->content) {

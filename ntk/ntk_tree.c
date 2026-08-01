@@ -65,6 +65,24 @@ static int tree_visible_node_count(const NtkTreeNode *node) {
     return count;
 }
 
+static int tree_visible_width(const NtkTreeNode *node, int depth, NtkFont *font) {
+    int width = 0;
+    if (node->parent) {
+        NtkSize text_size = ntk_font_measure_text(font, node->text ? node->text : "");
+        width = 4 + depth * NTK_TREE_INDENT + 15 + text_size.width + 6;
+        if (node->icon) width += 18;
+        ++depth;
+    }
+
+    if (node->expanded) {
+        for (int i = 0; i < node->child_count; ++i) {
+            int child_width = tree_visible_width(node->children[i], depth, font);
+            if (child_width > width) width = child_width;
+        }
+    }
+    return width;
+}
+
 static void tree_paint_node(NtkWidget *widget,
                             NtkPainter *painter,
                             NtkTreeNode *node,
@@ -164,13 +182,10 @@ static void tree_paint(NtkWidget *widget, NtkPainter *painter) {
 
     NtkFont *font = ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT);
     ntk_painter_set_font(painter, font);
-    ntk_painter_set_clip_rect(painter,
-                              NTK_RECT(origin.x + 2, origin.y + 2,
-                                       geometry.width - 4, geometry.height - 4));
-
+    // The viewport owns clipping. Replacing it here lets a tall tree overpaint
+    // the scrollbars and the widget next to it.
     int row = 0;
     tree_paint_node(widget, painter, &view->root, 0, &row);
-    ntk_painter_clear_clip(painter);
 }
 
 static bool tree_handle_event(NtkWidget *widget, NtkEvent *event) {
@@ -178,6 +193,8 @@ static bool tree_handle_event(NtkWidget *widget, NtkEvent *event) {
         event->mouse_button != NTK_MOUSE_BUTTON_LEFT) {
         return false;
     }
+
+    if (event->mouse_pos.y < 2) return false;
 
     NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
     int wanted_row = (event->mouse_pos.y - 2) / NTK_TREE_ROW_HEIGHT;
@@ -202,7 +219,11 @@ static bool tree_handle_event(NtkWidget *widget, NtkEvent *event) {
 
 static NtkSize tree_preferred_size(NtkWidget *widget) {
     NtkTreeViewInstance *view = ntk_widget_get_instance_data(widget);
-    return NTK_SIZE(180,
+    NtkStyle *style = ntk_widget_get_style(widget);
+    NtkFont *font = ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT);
+    int width = tree_visible_width(&view->root, 0, font);
+    if (width < 180) width = 180;
+    return NTK_SIZE(width,
                     tree_visible_node_count(&view->root) * NTK_TREE_ROW_HEIGHT + 4);
 }
 

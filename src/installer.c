@@ -104,6 +104,23 @@ static int g_pkg_total_checked = 0;
 
 static char g_error_message[256] = {0};
 
+// fix for ntk_stack_set_visible_page not repainting the stack properly
+static void show_installer_page(const char *page_id) {
+    if (!g_stack || !g_win || !page_id) return;
+
+    NtkPainter *painter = ntk_painter_new(g_win);
+    if (painter) {
+        NtkStyle *style = ntk_widget_get_style(g_stack);
+        NtkColor background = ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG);
+        ntk_painter_set_color(painter, background);
+        ntk_painter_fill_rect(painter, ntk_widget_get_geometry(g_stack));
+        ntk_painter_destroy(painter);
+    }
+
+    ntk_stack_set_visible_page(g_stack, page_id);
+    ntk_widget_repaint(g_stack);
+}
+
 static int sc_strcmp(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
@@ -570,13 +587,13 @@ static void run_installation_sync(void) {
 
     set_progress(1.00f, "Installation complete!");
     g_current_page_idx = 7;
-    ntk_stack_set_visible_page(g_stack, PAGE_FINISH);
+    show_installer_page(PAGE_FINISH);
     update_page_state();
     return;
 
 error:
     g_current_page_idx = 5; 
-    ntk_stack_set_visible_page(g_stack, PAGE_CONFIRM);
+    show_installer_page(PAGE_CONFIRM);
     update_page_state();
 }
 
@@ -596,7 +613,7 @@ static void on_btn_back_clicked(NtkWidget *w, void *userdata) {
         } else {
             g_current_page_idx--;
         }
-        ntk_stack_set_visible_page(g_stack, g_pages[g_current_page_idx]);
+        show_installer_page(g_pages[g_current_page_idx]);
         update_page_state();
     }
 }
@@ -623,7 +640,7 @@ static void on_btn_next_clicked(NtkWidget *w, void *userdata) {
                 }
             }
             g_current_page_idx = 4;
-            ntk_stack_set_visible_page(g_stack, PAGE_WARNING);
+            show_installer_page(PAGE_WARNING);
             update_page_state();
             return;
         } else {
@@ -659,7 +676,7 @@ static void on_btn_next_clicked(NtkWidget *w, void *userdata) {
         if (!proceed) return;
         
         g_current_page_idx = 6;
-        ntk_stack_set_visible_page(g_stack, PAGE_PROGRESS);
+        show_installer_page(PAGE_PROGRESS);
         update_page_state();
         
         run_installation_sync();
@@ -672,7 +689,7 @@ static void on_btn_next_clicked(NtkWidget *w, void *userdata) {
     
     if (g_current_page_idx + 1 < (int)(sizeof(g_pages)/sizeof(g_pages[0]))) {
         g_current_page_idx++;
-        ntk_stack_set_visible_page(g_stack, g_pages[g_current_page_idx]);
+        show_installer_page(g_pages[g_current_page_idx]);
         update_page_state();
     }
 }
@@ -899,7 +916,7 @@ int main(void) {
     NtkWidget *lbl_finish_desc3 = ntk_label_new("Click Finish to reboot your system and start BoredOS!", p_finish);
     ntk_box_pack_start(p_finish, lbl_finish_desc3, false, false, 2);
     
-    ntk_stack_set_visible_page(g_stack, PAGE_WELCOME);
+    show_installer_page(PAGE_WELCOME);
     
     NtkWidget *sep_canvas = ntk_canvas_new(vbox_right);
     ntk_widget_set_min_size(sep_canvas, NTK_SIZE(480, 2));

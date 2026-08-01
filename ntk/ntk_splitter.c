@@ -120,6 +120,9 @@ static void splitter_layout(NtkWidget *w) {
     NtkRect geom = ntk_widget_get_geometry(w);
 
     int limit = (inst->orientation == NTK_HORIZONTAL) ? geom.width : geom.height;
+    
+    if (limit <= 0) return;
+
     int max_position = limit - inst->handle_width - 20;
     if (max_position < 20) {
         inst->position = (limit - inst->handle_width) / 2;

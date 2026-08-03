@@ -16,13 +16,15 @@ struct NtkPixmap {
 
 NtkPixmap* ntk_pixmap_new(int width, int height) {
     if (width <= 0 || height <= 0) return NULL;
+    size_t pixel_count = (size_t)width * (size_t)height;
+    if (pixel_count > SIZE_MAX / sizeof(uint32_t)) return NULL;
 
     NtkPixmap *pm = calloc(1, sizeof(NtkPixmap));
     if (!pm) return NULL;
 
     pm->width  = width;
     pm->height = height;
-    pm->pixels = calloc((size_t)(width * height), sizeof(uint32_t));
+    pm->pixels = calloc(pixel_count, sizeof(uint32_t));
     if (!pm->pixels) {
         free(pm);
         return NULL;
@@ -31,7 +33,9 @@ NtkPixmap* ntk_pixmap_new(int width, int height) {
     return pm;
 }
 
-NtkPixmap* ntk_pixmap_new_from_file(const char *path) {
+static NtkPixmap *pixmap_new_from_file(const char *path,
+                                       int max_width,
+                                       int max_height) {
     if (!path) return NULL;
 
     FILE *f = fopen(path, "rb");
@@ -72,6 +76,22 @@ NtkPixmap* ntk_pixmap_new_from_file(const char *path) {
         return NULL;
     }
 
+    if (max_width > 0 && max_height > 0) {
+        int source_width = 0;
+        int source_height = 0;
+        int source_channels = 0;
+        if (!stbi_info_from_memory(buf, (int)size, &source_width,
+                                   &source_height, &source_channels) ||
+            source_width <= 0 || source_height <= 0 ||
+            (uint64_t)source_width * (uint64_t)source_height >
+                16u * 1024u * 1024u) {
+            printf("[NTK PIXMAP] thumbnail source is invalid or too large: %s\n",
+                   path);
+            free(buf);
+            return NULL;
+        }
+    }
+
     int img_w = 0, img_h = 0, channels = 0;
     unsigned char *data = stbi_load_from_memory(buf, (int)size, &img_w, &img_h, &channels, 4);
     free(buf);
@@ -81,34 +101,67 @@ NtkPixmap* ntk_pixmap_new_from_file(const char *path) {
         return NULL;
     }
 
-    uint32_t *pixels = malloc((size_t)(img_w * img_h) * sizeof(uint32_t));
-    if (!pixels) {
-        printf("[NTK PIXMAP] ntk_pixmap_new_from_file: failed to allocate pixels buffer (%dx%d) for %s\n", img_w, img_h, path);
+    int output_width = img_w;
+    int output_height = img_h;
+    if (max_width > 0 && max_height > 0 &&
+        (img_w > max_width || img_h > max_height)) {
+        if ((int64_t)img_w * max_height > (int64_t)img_h * max_width) {
+            output_width = max_width;
+            output_height = (int)((int64_t)img_h * max_width / img_w);
+        } else {
+            output_height = max_height;
+            output_width = (int)((int64_t)img_w * max_height / img_h);
+        }
+        if (output_width < 1) output_width = 1;
+        if (output_height < 1) output_height = 1;
+    }
+
+    NtkPixmap *pm = ntk_pixmap_new(output_width, output_height);
+    if (!pm) {
+        printf("[NTK PIXMAP] ntk_pixmap_new_from_file: failed to allocate pixels buffer (%dx%d) for %s\n", output_width, output_height, path);
         stbi_image_free(data);
         return NULL;
     }
 
-    for (int i = 0; i < img_w * img_h; i++) {
-        uint8_t r = data[i * 4 + 0];
-        uint8_t g = data[i * 4 + 1];
-        uint8_t b = data[i * 4 + 2];
-        uint8_t a = data[i * 4 + 3];
-        pixels[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+    if (output_width == img_w && output_height == img_h) {
+        size_t pixel_count = (size_t)img_w * (size_t)img_h;
+        for (size_t index = 0; index < pixel_count; ++index) {
+            uint8_t *pixel = data + index * 4;
+            pm->pixels[index] = ((uint32_t)pixel[3] << 24) |
+                                ((uint32_t)pixel[0] << 16) |
+                                ((uint32_t)pixel[1] << 8) |
+                                (uint32_t)pixel[2];
+        }
+    } else {
+        for (int y = 0; y < output_height; ++y) {
+            int source_y = (int)((int64_t)y * img_h / output_height);
+            for (int x = 0; x < output_width; ++x) {
+                int source_x = (int)((int64_t)x * img_w / output_width);
+                size_t source_index = ((size_t)source_y * (size_t)img_w +
+                                       (size_t)source_x) * 4;
+                uint8_t *pixel = data + source_index;
+                pm->pixels[(size_t)y * (size_t)output_width + (size_t)x] =
+                    ((uint32_t)pixel[3] << 24) |
+                    ((uint32_t)pixel[0] << 16) |
+                    ((uint32_t)pixel[1] << 8) |
+                    (uint32_t)pixel[2];
+            }
+        }
     }
 
     stbi_image_free(data);
-
-    NtkPixmap *pm = calloc(1, sizeof(NtkPixmap));
-    if (!pm) {
-        free(pixels);
-        return NULL;
-    }
-
-    pm->width  = img_w;
-    pm->height = img_h;
-    pm->pixels = pixels;
-    printf("[NTK PIXMAP] ntk_pixmap_new_from_file: successfully loaded %s (%dx%d, %d channels)\n", path, img_w, img_h, channels);
     return pm;
+}
+
+NtkPixmap* ntk_pixmap_new_from_file(const char *path) {
+    return pixmap_new_from_file(path, 0, 0);
+}
+
+NtkPixmap* ntk_pixmap_new_thumbnail_from_file(const char *path,
+                                              int max_width,
+                                              int max_height) {
+    if (max_width <= 0 || max_height <= 0) return NULL;
+    return pixmap_new_from_file(path, max_width, max_height);
 }
 
 NtkPixmap* ntk_pixmap_new_from_data(unsigned char *data, int width, int height, int stride, NtkPixelFormat format) {

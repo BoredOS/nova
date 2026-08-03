@@ -120,8 +120,17 @@ static void splitter_layout(NtkWidget *w) {
     NtkRect geom = ntk_widget_get_geometry(w);
 
     int limit = (inst->orientation == NTK_HORIZONTAL) ? geom.width : geom.height;
-    if (inst->position > limit - 20) inst->position = limit - 20;
-    if (inst->position < 20) inst->position = 20;
+    
+    if (limit <= 0) return;
+
+    int max_position = limit - inst->handle_width - 20;
+    if (max_position < 20) {
+        inst->position = (limit - inst->handle_width) / 2;
+        if (inst->position < 0) inst->position = 0;
+    } else {
+        if (inst->position > max_position) inst->position = max_position;
+        if (inst->position < 20) inst->position = 20;
+    }
 
     if (inst->orientation == NTK_HORIZONTAL) {
         if (inst->w1) {
@@ -170,7 +179,6 @@ static NtkSize splitter_preferred_size(NtkWidget *w) {
 
 static bool splitter_handle_event(NtkWidget *w, NtkEvent *e) {
     NtkSplitterInstance *inst = ntk_widget_get_instance_data(w);
-    NtkRect geom = ntk_widget_get_geometry(w);
 
     if (e->type == NTK_EVENT_MOUSE_PRESS) {
         NtkPoint p = e->mouse_pos;

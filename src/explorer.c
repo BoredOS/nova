@@ -17,6 +17,8 @@
 #include <strings.h>
 #include <sys/time.h>
 
+#include "utf-8.h"
+
 // CONSTANTS
 #define FILE_MANAGER_PATH_MAX 1024
 #define FILE_MANAGER_HISTORY_MAX 128
@@ -1016,6 +1018,45 @@ static size_t file_view_selection_count(FileManager *manager) {
     return count;
 }
 
+static const char *file_view_display_name(NtkFont *font, const char *name,
+                                          int max_width, char *buffer,
+                                          size_t buffer_size) {
+    static const char ellipsis[] = "...";
+
+    if (!name || !font || max_width <= 0) return "";
+    if (ntk_font_measure_text(font, name).width <= max_width) return name;
+    if (!buffer || buffer_size < sizeof(ellipsis)) return "";
+
+    size_t name_length = strlen(name);
+    size_t prefix_length = name_length;
+    size_t maximum_prefix = buffer_size - sizeof(ellipsis);
+    if (prefix_length > maximum_prefix) {
+        prefix_length = maximum_prefix;
+        while (prefix_length > 0 &&
+               (((unsigned char)name[prefix_length] & 0xc0) == 0x80)) {
+            --prefix_length;
+        }
+    }
+
+    while (prefix_length > 0) {
+        memcpy(buffer, name, prefix_length);
+        memcpy(buffer + prefix_length, ellipsis, sizeof(ellipsis));
+        if (ntk_font_measure_text(font, buffer).width <= max_width) {
+            return buffer;
+        }
+        prefix_length = (size_t)(text_prev_utf8(name, name + prefix_length) - name);
+    }
+
+    for (size_t dot_count = 3; dot_count > 0; --dot_count) {
+        memcpy(buffer, ellipsis, dot_count);
+        buffer[dot_count] = '\0';
+        if (ntk_font_measure_text(font, buffer).width <= max_width) return buffer;
+    }
+
+    buffer[0] = '\0';
+    return buffer;
+}
+
 static void file_view_draw_header(NtkWidget *widget, NtkPainter *painter) {
     NtkStyle *style = ntk_widget_get_style(widget);
     NtkPoint origin = ntk_widget_map_to_global(widget, NTK_POINT(0, 0));
@@ -1085,6 +1126,7 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
         }
 
         NtkPixmap *icon = image_preview_cached(manager, entry);
+        char display_name[FILE_MANAGER_PATH_MAX];
         if (manager->view_mode == VIEW_LARGE_ICONS) {
             if (!icon) {
                 icon = file_icon(manager, entry->path, &entry->info, false, 32);
@@ -1093,8 +1135,11 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
                 draw_pixmap_fitted(painter, icon,
                                    NTK_RECT(item.x + 22, item.y + 3, 48, 40));
             }
+            const char *label = file_view_display_name(
+                font, entry->name, item.width - 4,
+                display_name, sizeof(display_name));
             ntk_painter_draw_text_rect(
-                painter, entry->name,
+                painter, label,
                 NTK_RECT(item.x + 2, item.y + 46, item.width - 4, 22),
                 NTK_ALIGN_CENTER);
         } else {
@@ -1108,8 +1153,11 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
             int name_width = item.width - 26;
             if (manager->view_mode == VIEW_DETAILS) name_width = 256;
             if (name_width < 1) name_width = 1;
+            const char *label = file_view_display_name(
+                font, entry->name, name_width,
+                display_name, sizeof(display_name));
             ntk_painter_draw_text_rect(
-                painter, entry->name,
+                painter, label,
                 NTK_RECT(item.x + 24, item.y, name_width, item.height),
                 NTK_ALIGN_START);
 

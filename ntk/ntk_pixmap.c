@@ -180,10 +180,11 @@ NtkPixmap* ntk_pixmap_new_from_data(unsigned char *data, int width, int height, 
                     break;
                 case NTK_PIXEL_RGBA32: {
                     int idx = x * 4;
-                    pixel = ((uint32_t)row[idx + 3] << 24) |
-                            ((uint32_t)row[idx    ] << 16) |
-                            ((uint32_t)row[idx + 1] <<  8) |
-                             (uint32_t)row[idx + 2];
+                    uint8_t r = row[idx + 0];
+                    uint8_t g = row[idx + 1];
+                    uint8_t b = row[idx + 2];
+                    uint8_t a = row[idx + 3];
+                    pixel = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
                     break;
                 }
                 case NTK_PIXEL_RGB24: {
@@ -220,6 +221,7 @@ void ntk_pixmap_destroy(NtkPixmap *pm) {
     free(pm->pixels);
     free(pm);
 }
+
 int ntk_pixmap_get_width(NtkPixmap *pm) {
     return pm ? pm->width : 0;
 }
@@ -232,6 +234,7 @@ NtkSize ntk_pixmap_get_size(NtkPixmap *pm) {
     if (!pm) return NTK_SIZE_ZERO;
     return NTK_SIZE(pm->width, pm->height);
 }
+
 NtkPixmap* ntk_pixmap_scale(NtkPixmap *pm, NtkSize size, NtkScaleMode mode) {
     if (!pm || size.width <= 0 || size.height <= 0) return NULL;
 
@@ -255,18 +258,37 @@ NtkPixmap* ntk_pixmap_scale(NtkPixmap *pm, NtkSize size, NtkScaleMode mode) {
         if (dst_w <= 0) dst_w = 1;
         if (dst_h <= 0) dst_h = 1;
     }
+
+    if (dst_w == pm->width && dst_h == pm->height) {
+        return ntk_pixmap_clone(pm);
+    }
+
     NtkPixmap *result = ntk_pixmap_new(dst_w, dst_h);
     if (!result) return NULL;
+
+    int *src_x_table = malloc((size_t)dst_w * sizeof(int));
+    if (!src_x_table) {
+        ntk_pixmap_destroy(result);
+        return NULL;
+    }
+
+    for (int x = 0; x < dst_w; x++) {
+        int src_x = (int)((uint64_t)x * (uint64_t)pm->width / (uint64_t)dst_w);
+        if (src_x >= pm->width) src_x = pm->width - 1;
+        src_x_table[x] = src_x;
+    }
+
     for (int y = 0; y < dst_h; y++) {
         int src_y = (int)((uint64_t)y * (uint64_t)pm->height / (uint64_t)dst_h);
         if (src_y >= pm->height) src_y = pm->height - 1;
+        const uint32_t *src_row = &pm->pixels[src_y * pm->width];
+        uint32_t *dst_row = &result->pixels[y * dst_w];
         for (int x = 0; x < dst_w; x++) {
-            int src_x = (int)((uint64_t)x * (uint64_t)pm->width / (uint64_t)dst_w);
-            if (src_x >= pm->width) src_x = pm->width - 1;
-            result->pixels[y * dst_w + x] = pm->pixels[src_y * pm->width + src_x];
+            dst_row[x] = src_row[src_x_table[x]];
         }
     }
 
+    free(src_x_table);
     return result;
 }
 

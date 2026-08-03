@@ -85,7 +85,7 @@ int main(void) {
     ntk_label_set_alignment(sep, NTK_ALIGN_CENTER);
     ntk_box_pack_start(vbox, sep, false, false, 5);
 
-    NtkWidget *lbl_copyright = ntk_label_new("(C) 2023-2026 Christiaan (chris@boreddev.nl)", vbox);
+    NtkWidget *lbl_copyright = ntk_label_new("(C) 2023-2026 BoredOS Contributors", vbox);
     ntk_label_set_alignment(lbl_copyright, NTK_ALIGN_CENTER);
     ntk_box_pack_start(vbox, lbl_copyright, false, false, 2);
 

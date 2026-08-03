@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -23,6 +24,12 @@
 #include "libnovaproto/novaproto.h"
 #include "stb_image.h"
 #define theme_resolve_color ntk_style_resolve_color
+static bool g_partial_render = false;
+static int g_render_x = 0;
+static int g_render_y = 0;
+static int g_render_w = 0;
+static int g_render_h = 0;
+
 static void ui_font_init(const char *path, int size) {
     (void)path;
     (void)size;
@@ -41,15 +48,37 @@ static void ui_draw_string(uint32_t *dest, int dest_w, int dest_h, int x, int y,
     }
 }
 
-static void ui_draw_string_rect(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, const char *text, uint32_t color) {
+static void ui_draw_string_rect_band(uint32_t *dest, int dest_w, int dest_h, int x, int y, int w, int h, const char *text, uint32_t color, int band_y_start, int band_y_end) {
+    int clip_y1 = y < band_y_start ? band_y_start : y;
+    int clip_y2 = (y + h) > band_y_end ? band_y_end : (y + h);
+    if (g_partial_render) {
+        if (clip_y1 < g_render_y) clip_y1 = g_render_y;
+        if (clip_y2 > g_render_y + g_render_h) clip_y2 = g_render_y + g_render_h;
+    }
+    if (clip_y1 >= clip_y2) return;
+
     NtkPainter *p = ntk_painter_new_from_buffer(dest, dest_w, dest_h);
     if (p) {
         NtkStyle *style = ntk_style_get_global();
         NtkFont *font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        if (!font) {
+            ntk_style_apply(ntk_style_new());
+            style = ntk_style_get_global();
+            font = style ? ntk_style_get_font(style, NTK_STYLE_ELEMENT_DEFAULT_FONT) : NULL;
+        }
         if (font) ntk_painter_set_font(p, font);
         ntk_painter_set_color(p, color);
-        NtkRect r = NTK_RECT(x, y, w, h);
-        ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_START);
+        int clip_x1 = x;
+        int clip_x2 = x + w;
+        if (g_partial_render) {
+            if (clip_x1 < g_render_x) clip_x1 = g_render_x;
+            if (clip_x2 > g_render_x + g_render_w) clip_x2 = g_render_x + g_render_w;
+        }
+        if (clip_x1 < clip_x2) {
+            ntk_painter_set_clip_rect(p, NTK_RECT(clip_x1, clip_y1, clip_x2 - clip_x1, clip_y2 - clip_y1));
+            NtkRect r = NTK_RECT(x, y, w, h);
+            ntk_painter_draw_text_rect(p, text, r, NTK_ALIGN_START);
+        }
         ntk_painter_destroy(p);
     }
 }
@@ -96,26 +125,41 @@ static void ui_draw_panel(uint32_t *dest, int dest_w, int dest_h, int x, int y, 
 #define MAX_CLIENTS 64
 #define TITLEBAR_HEIGHT 20
 #define BORDER_WIDTH 4
+
 static inline void draw_pixel_safe(uint32_t *buffer, int w, int h, int x, int y, uint32_t color) {
     if (x >= 0 && x < w && y >= 0 && y < h) {
         buffer[y * w + x] = color;
     }
 }
 
-static void draw_line_h_safe(uint32_t *buffer, int w, int h, int x1, int y, int x2, uint32_t color) {
-    if (y < 0 || y >= h) return;
+static void draw_line_h_safe_band(uint32_t *buffer, int w, int h, int x1, int y, int x2, uint32_t color, int band_y_start, int band_y_end) {
+    if (y < band_y_start || y >= band_y_end || y < 0 || y >= h) return;
     int start = x1 < 0 ? 0 : x1;
     int end = x2 >= w ? w - 1 : x2;
+    if (g_partial_render) {
+        if (y < g_render_y || y >= g_render_y + g_render_h) return;
+        if (start < g_render_x) start = g_render_x;
+        if (end >= g_render_x + g_render_w) end = g_render_x + g_render_w - 1;
+    }
+    if (start > end) return;
     uint32_t *row = &buffer[y * w];
     for (int x = start; x <= end; x++) {
         row[x] = color;
     }
 }
 
-static void draw_line_v_safe(uint32_t *buffer, int w, int h, int x, int y1, int y2, uint32_t color) {
+static void draw_line_v_safe_band(uint32_t *buffer, int w, int h, int x, int y1, int y2, uint32_t color, int band_y_start, int band_y_end) {
     if (x < 0 || x >= w) return;
     int start = y1 < 0 ? 0 : y1;
     int end = y2 >= h ? h - 1 : y2;
+    if (start < band_y_start) start = band_y_start;
+    if (end >= band_y_end) end = band_y_end - 1;
+    if (g_partial_render) {
+        if (x < g_render_x || x >= g_render_x + g_render_w) return;
+        if (start < g_render_y) start = g_render_y;
+        if (end >= g_render_y + g_render_h) end = g_render_y + g_render_h - 1;
+    }
+    if (start > end) return;
     for (int y = start; y <= end; y++) {
         buffer[y * w + x] = color;
     }
@@ -126,6 +170,35 @@ static void fill_rect_safe(uint32_t *buffer, int w, int h, int rx, int ry, int r
     int y1 = ry < 0 ? 0 : ry;
     int x2 = rx + rw > w ? w : rx + rw;
     int y2 = ry + rh > h ? h : ry + rh;
+    if (g_partial_render) {
+        if (x1 < g_render_x) x1 = g_render_x;
+        if (y1 < g_render_y) y1 = g_render_y;
+        if (x2 > g_render_x + g_render_w) x2 = g_render_x + g_render_w;
+        if (y2 > g_render_y + g_render_h) y2 = g_render_y + g_render_h;
+    }
+    if (x1 >= x2 || y1 >= y2) return;
+    for (int y = y1; y < y2; y++) {
+        uint32_t *row = &buffer[y * w];
+        for (int x = x1; x < x2; x++) {
+            row[x] = color;
+        }
+    }
+}
+
+static void fill_rect_safe_band(uint32_t *buffer, int w, int h, int rx, int ry, int rw, int rh, uint32_t color, int band_y_start, int band_y_end) {
+    int x1 = rx < 0 ? 0 : rx;
+    int y1 = ry < 0 ? 0 : ry;
+    int x2 = rx + rw > w ? w : rx + rw;
+    int y2 = ry + rh > h ? h : ry + rh;
+    if (g_partial_render) {
+        if (x1 < g_render_x) x1 = g_render_x;
+        if (y1 < g_render_y) y1 = g_render_y;
+        if (x2 > g_render_x + g_render_w) x2 = g_render_x + g_render_w;
+        if (y2 > g_render_y + g_render_h) y2 = g_render_y + g_render_h;
+    }
+    if (y1 < band_y_start) y1 = band_y_start;
+    if (y2 > band_y_end) y2 = band_y_end;
+    if (x1 >= x2 || y1 >= y2) return;
     for (int y = y1; y < y2; y++) {
         uint32_t *row = &buffer[y * w];
         for (int x = x1; x < x2; x++) {
@@ -134,31 +207,31 @@ static void fill_rect_safe(uint32_t *buffer, int w, int h, int rx, int ry, int r
     }
 }
 struct surface;
-static void draw_decorations_icon(uint32_t *buffer, int w, int h, int ix, int iy, const struct surface *surf);
+static void draw_decorations_icon_band(uint32_t *buffer, int w, int h, int ix, int iy, const struct surface *surf, int band_y_start, int band_y_end);
 
-static void draw_title_button(uint32_t *buffer, int w, int h, int bx, int by, int bw, int bh, int type, bool pressed) {
-    fill_rect_safe(buffer, w, h, bx, by, bw, bh, 0xFFB0B0B0);
+static void draw_title_button_band(uint32_t *buffer, int w, int h, int bx, int by, int bw, int bh, int type, bool pressed, int band_y_start, int band_y_end) {
+    fill_rect_safe_band(buffer, w, h, bx, by, bw, bh, 0xFFB0B0B0, band_y_start, band_y_end);
 
     if (pressed) {
-        draw_line_v_safe(buffer, w, h, bx, by, by + bh - 1, 0xFF676767);
-        draw_line_h_safe(buffer, w, h, bx, by, bx + bw - 1, 0xFF676767);
-        draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFF676767);
-        draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFF676767);
+        draw_line_v_safe_band(buffer, w, h, bx, by, by + bh - 1, 0xFF676767, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx, by, bx + bw - 1, 0xFF676767, band_y_start, band_y_end);
+        draw_line_v_safe_band(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFF676767, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFF676767, band_y_start, band_y_end);
         
-        draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFFFFFFFF);
-        draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFFFFFFFF);
-        draw_line_v_safe(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFFFFFFFF);
-        draw_line_h_safe(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFFFFFFFF);
+        draw_line_v_safe_band(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+        draw_line_v_safe_band(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFFFFFFFF, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFFFFFFFF, band_y_start, band_y_end);
     } else {
-        draw_line_v_safe(buffer, w, h, bx, by, by + bh - 1, 0xFFFFFFFF);
-        draw_line_h_safe(buffer, w, h, bx, by, bx + bw - 1, 0xFFFFFFFF);
-        draw_line_v_safe(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFFFFFFFF);
-        draw_line_h_safe(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFFFFFFFF);
+        draw_line_v_safe_band(buffer, w, h, bx, by, by + bh - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx, by, bx + bw - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+        draw_line_v_safe_band(buffer, w, h, bx + 1, by + 1, by + bh - 2, 0xFFFFFFFF, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx + 1, by + 1, bx + bw - 2, 0xFFFFFFFF, band_y_start, band_y_end);
         
-        draw_line_v_safe(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFF676767);
-        draw_line_h_safe(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFF676767);
-        draw_line_v_safe(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFF676767);
-        draw_line_h_safe(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFF676767);
+        draw_line_v_safe_band(buffer, w, h, bx + bw - 1, by, by + bh - 1, 0xFF676767, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx, by + bh - 1, bx + bw - 1, 0xFF676767, band_y_start, band_y_end);
+        draw_line_v_safe_band(buffer, w, h, bx + bw - 2, by + 1, by + bh - 2, 0xFF676767, band_y_start, band_y_end);
+        draw_line_h_safe_band(buffer, w, h, bx + 1, by + bh - 2, bx + bw - 2, 0xFF676767, band_y_start, band_y_end);
     }
 
     int ox = pressed ? 1 : 0;
@@ -169,18 +242,17 @@ static void draw_title_button(uint32_t *buffer, int w, int h, int bx, int by, in
     uint32_t icon_color = 0xFF000000;
 
     if (type == 0) { // Minimize
-        fill_rect_safe(buffer, w, h, cx + 1, cy + 5, 6, 2, icon_color);
+        fill_rect_safe_band(buffer, w, h, cx + 1, cy + 5, 6, 2, icon_color, band_y_start, band_y_end);
     } else if (type == 1) { // Maximize
-        fill_rect_safe(buffer, w, h, cx, cy, 8, 2, icon_color);
-        draw_line_v_safe(buffer, w, h, cx, cy + 2, cy + 7, icon_color);
-        draw_line_v_safe(buffer, w, h, cx + 7, cy + 2, cy + 7, icon_color);
-        draw_line_h_safe(buffer, w, h, cx, cy + 7, cx + 7, icon_color);
+        fill_rect_safe_band(buffer, w, h, cx, cy, 8, 2, icon_color, band_y_start, band_y_end);
+        fill_rect_safe_band(buffer, w, h, cx, cy + 2, 8, 1, icon_color, band_y_start, band_y_end);
+        fill_rect_safe_band(buffer, w, h, cx, cy + 3, 2, 4, icon_color, band_y_start, band_y_end);
+        fill_rect_safe_band(buffer, w, h, cx + 6, cy + 3, 2, 4, icon_color, band_y_start, band_y_end);
+        fill_rect_safe_band(buffer, w, h, cx, cy + 7, 8, 1, icon_color, band_y_start, band_y_end);
     } else if (type == 2) { // Close
-        for (int i = 0; i < 8; i++) {
-            draw_pixel_safe(buffer, w, h, cx + i, cy + i, icon_color);
-            draw_pixel_safe(buffer, w, h, cx + 1 + i, cy + i, icon_color);
-            draw_pixel_safe(buffer, w, h, cx + 7 - i, cy + i, icon_color);
-            draw_pixel_safe(buffer, w, h, cx + 6 - i, cy + i, icon_color);
+        for (int i = 0; i < 7; i++) {
+            fill_rect_safe_band(buffer, w, h, cx + i, cy + i, 2, 1, icon_color, band_y_start, band_y_end);
+            fill_rect_safe_band(buffer, w, h, cx + 6 - i, cy + i, 2, 1, icon_color, band_y_start, band_y_end);
         }
     }
 }
@@ -285,6 +357,7 @@ typedef struct surface {
 static surface_t *surface_head = NULL;
 static surface_t *surface_tail = NULL;
 static uint32_t next_surface_id = 1;
+static uint64_t g_shm_sequence_id = 1;
 
 // Global theme options
 static uint32_t active_titlebar_top = 0xFF393939;
@@ -347,7 +420,29 @@ static void surface_load_icon(surface_t *surf) {
         return;
     }
 
-    FILE *f = fopen(surf->icon_path, "rb");
+    FILE *f = NULL;
+    char full_path[512];
+    if (surf->icon_path[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s", surf->icon_path);
+        f = fopen(full_path, "rb");
+    }
+    if (!f) {
+        const char *basename = strrchr(surf->icon_path, '/');
+        if (basename) basename++;
+        else basename = surf->icon_path;
+
+        const char *ext = (strstr(basename, ".png") || strstr(basename, ".PNG")) ? "" : ".png";
+        snprintf(full_path, sizeof(full_path), "/Library/Icons/serenityicons/16x16/%s%s", basename, ext);
+        f = fopen(full_path, "rb");
+        if (!f) {
+            snprintf(full_path, sizeof(full_path), "/Library/Icons/serenityicons/32x32/%s%s", basename, ext);
+            f = fopen(full_path, "rb");
+        }
+        if (!f) {
+            snprintf(full_path, sizeof(full_path), "/Library/Icons/boredos/%s%s", basename, ext);
+            f = fopen(full_path, "rb");
+        }
+    }
     if (!f) return;
 
     fseek(f, 0, SEEK_END);
@@ -364,16 +459,21 @@ static void surface_load_icon(surface_t *surf) {
         return;
     }
 
-    size_t read_size = fread(file_buf, 1, (size_t)size, f);
+    size_t total_rd = 0;
+    while (total_rd < (size_t)size) {
+        size_t rd = fread(file_buf + total_rd, 1, (size_t)size - total_rd, f);
+        if (rd == 0) break;
+        total_rd += rd;
+    }
     fclose(f);
 
-    if (read_size != (size_t)size) {
+    if (total_rd == 0) {
         free(file_buf);
         return;
     }
 
     int w = 0, h = 0, comp = 0;
-    unsigned char *rgba = stbi_load_from_memory(file_buf, (int)size, &w, &h, &comp, 4);
+    unsigned char *rgba = stbi_load_from_memory(file_buf, (int)total_rd, &w, &h, &comp, 4);
     free(file_buf);
 
     if (!rgba || w <= 0 || h <= 0) {
@@ -391,11 +491,11 @@ static void surface_load_icon(surface_t *surf) {
         int src_y = (y * h) / 16;
         for (int x = 0; x < 16; x++) {
             int src_x = (x * w) / 16;
-            int src_idx = src_y * w + src_x;
-            uint8_t r = rgba[src_idx * 4 + 0];
-            uint8_t g = rgba[src_idx * 4 + 1];
-            uint8_t b = rgba[src_idx * 4 + 2];
-            uint8_t a = rgba[src_idx * 4 + 3];
+            int src_idx = (src_y * w + src_x) * 4;
+            uint8_t r = rgba[src_idx + 0];
+            uint8_t g = rgba[src_idx + 1];
+            uint8_t b = rgba[src_idx + 2];
+            uint8_t a = rgba[src_idx + 3];
             scaled[y * 16 + x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
         }
     }
@@ -405,23 +505,33 @@ static void surface_load_icon(surface_t *surf) {
     surf->icon_loaded = true;
 }
 
-static void draw_decorations_icon(uint32_t *buffer, int w, int h, int ix, int iy, const surface_t *surf) {
+static void draw_decorations_icon_band(uint32_t *buffer, int w, int h, int ix, int iy, const surface_t *surf, int band_y_start, int band_y_end) {
+    if (!surf) return;
     if (surf->icon_loaded && surf->icon_pixels) {
         for (int y = 0; y < 16; y++) {
+            int py = iy + y;
+            if (py < band_y_start || py >= band_y_end || py < 0 || py >= h) continue;
+            if (g_partial_render && (py < g_render_y || py >= g_render_y + g_render_h)) continue;
             for (int x = 0; x < 16; x++) {
                 int px = ix + x;
-                int py = iy + y;
-                if (px >= 0 && px < w && py >= 0 && py < h) {
-                    uint32_t fg = surf->icon_pixels[y * 16 + x];
-                    uint32_t bg = buffer[py * w + px];
-                    buffer[py * w + px] = blend_pixel_alpha(bg, fg);
-                }
+                if (px < 0 || px >= w) continue;
+                if (g_partial_render && (px < g_render_x || px >= g_render_x + g_render_w)) continue;
+                uint32_t fg = surf->icon_pixels[y * 16 + x];
+                uint32_t bg = buffer[py * w + px];
+                buffer[py * w + px] = blend_pixel_alpha(bg, fg);
             }
         }
         return;
     }
 
-    const char *icon_path = surf->icon_path;
+    // Default fallback window icon (16x16 classic app window)
+    fill_rect_safe_band(buffer, w, h, ix, iy, 16, 16, 0xFFC0C0C0, band_y_start, band_y_end);
+    fill_rect_safe_band(buffer, w, h, ix + 1, iy + 1, 14, 3, 0xFF000080, band_y_start, band_y_end);
+    draw_line_h_safe_band(buffer, w, h, ix, iy, ix + 15, 0xFFFFFFFF, band_y_start, band_y_end);
+    draw_line_v_safe_band(buffer, w, h, ix, iy, iy + 15, 0xFFFFFFFF, band_y_start, band_y_end);
+    draw_line_h_safe_band(buffer, w, h, ix, iy + 15, ix + 15, 0xFF808080, band_y_start, band_y_end);
+    draw_line_v_safe_band(buffer, w, h, ix + 15, iy, iy + 15, 0xFF808080, band_y_start, band_y_end);
+    fill_rect_safe_band(buffer, w, h, ix + 2, iy + 5, 12, 9, 0xFFFFFFFF, band_y_start, band_y_end);
 }
 
 
@@ -466,17 +576,17 @@ static void mark_dirty_rect(int x, int y, int w, int h) {
         dirty_w = x2 - x1;
         dirty_h = y2 - y1;
         has_dirty_rect = true;
-        return;
+    } else {
+        int old_x2 = dirty_x + dirty_w;
+        int old_y2 = dirty_y + dirty_h;
+        if (x1 < dirty_x) dirty_x = x1;
+        if (y1 < dirty_y) dirty_y = y1;
+        if (x2 > old_x2) old_x2 = x2;
+        if (y2 > old_y2) old_y2 = y2;
+        dirty_w = old_x2 - dirty_x;
+        dirty_h = old_y2 - dirty_y;
     }
-
-    int old_x2 = dirty_x + dirty_w;
-    int old_y2 = dirty_y + dirty_h;
-    if (x1 < dirty_x) dirty_x = x1;
-    if (y1 < dirty_y) dirty_y = y1;
-    if (x2 > old_x2) old_x2 = x2;
-    if (y2 > old_y2) old_y2 = y2;
-    dirty_w = old_x2 - dirty_x;
-    dirty_h = old_y2 - dirty_y;
+    needs_composite = true;
 }
 
 // Signal self-pipe descriptors
@@ -1074,12 +1184,18 @@ surface_t *surface_get_focused(void) {
     return NULL;
 }
 
-// Send frame headers to socket clients
 static int send_all(int fd, const void *buf, size_t size) {
     size_t written = 0;
     while (written < size) {
         ssize_t rc = send(fd, (const char *)buf + written, size - written, 0);
         if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            if (poll(&pfd, 1, 4) > 0 && (pfd.revents & POLLOUT)) {
+                continue; 
+            }
+            return -1; 
+        }
         if (rc <= 0) return -1;
         written += (size_t)rc;
     }
@@ -1739,6 +1855,79 @@ static void blit_surface_pixels(surface_t *surf, int dst_x, int dst_y, int copy_
     (void)blit_area;
 }
 
+static void blit_surface_pixels_band(surface_t *surf, int dst_x, int dst_y, int copy_w, int copy_h, int band_y_start, int band_y_end) {
+    if (!surf || !surf->pixels || copy_w <= 0 || copy_h <= 0) return;
+
+    int draw_x1 = dst_x;
+    int draw_y1 = dst_y;
+    int draw_x2 = dst_x + copy_w;
+    int draw_y2 = dst_y + copy_h;
+
+    if (draw_x1 < surf->x) draw_x1 = surf->x;
+    if (draw_y1 < surf->y) draw_y1 = surf->y;
+    if (draw_x2 > surf->x + (int)surf->buffer_w) draw_x2 = surf->x + (int)surf->buffer_w;
+    if (draw_y2 > surf->y + (int)surf->buffer_h) draw_y2 = surf->y + (int)surf->buffer_h;
+    if (draw_x1 < 0) draw_x1 = 0;
+    if (draw_y1 < 0) draw_y1 = 0;
+    if (draw_x2 > screen_w) draw_x2 = screen_w;
+    if (draw_y2 > screen_h) draw_y2 = screen_h;
+
+    if (g_partial_render) {
+        if (draw_x1 < g_render_x) draw_x1 = g_render_x;
+        if (draw_y1 < g_render_y) draw_y1 = g_render_y;
+        if (draw_x2 > g_render_x + g_render_w) draw_x2 = g_render_x + g_render_w;
+        if (draw_y2 > g_render_y + g_render_h) draw_y2 = g_render_y + g_render_h;
+    }
+
+    if (draw_y1 < band_y_start) draw_y1 = band_y_start;
+    if (draw_y2 > band_y_end) draw_y2 = band_y_end;
+
+    int draw_w = draw_x2 - draw_x1;
+    int draw_h = draw_y2 - draw_y1;
+    if (draw_w <= 0 || draw_h <= 0) return;
+
+    int src_x = draw_x1 - surf->x;
+    int src_y = draw_y1 - surf->y;
+    bool opaque = (surf->flags & SURFACE_FLAG_TRANSPARENT) == 0;
+
+    for (int y = 0; y < draw_h; y++) {
+        uint32_t *dst_row = &back_buffer[(draw_y1 + y) * screen_w + draw_x1];
+        uint32_t *src_row = &surf->pixels[(src_y + y) * surf->buffer_w + src_x];
+        if (opaque) {
+            memcpy(dst_row, src_row, (size_t)draw_w * sizeof(uint32_t));
+            continue;
+        }
+
+        for (int x = 0; x < draw_w; x++) {
+            uint32_t src_pixel = src_row[x];
+            uint32_t src_a = (src_pixel >> 24) & 0xFF;
+            if (src_a == 0) continue;
+            if (src_a == 255) {
+                dst_row[x] = src_pixel;
+                continue;
+            }
+
+            uint32_t dst_pixel = dst_row[x];
+            uint32_t dst_a = (dst_pixel >> 24) & 0xFF;
+            uint32_t out_a = src_a + dst_a * (255 - src_a) / 255;
+            if (out_a == 0) continue;
+
+            uint32_t src_r = (src_pixel >> 16) & 0xFF;
+            uint32_t src_g = (src_pixel >> 8) & 0xFF;
+            uint32_t src_b = src_pixel & 0xFF;
+            uint32_t dst_r = (dst_pixel >> 16) & 0xFF;
+            uint32_t dst_g = (dst_pixel >> 8) & 0xFF;
+            uint32_t dst_b = dst_pixel & 0xFF;
+
+            uint32_t out_r = (src_r * src_a + dst_r * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_g = (src_g * src_a + dst_g * dst_a * (255 - src_a) / 255) / out_a;
+            uint32_t out_b = (src_b * src_a + dst_b * dst_a * (255 - src_a) / 255) / out_a;
+
+            dst_row[x] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+}
+
 void update_cursor_atomic_combined(int new_x, int new_y) {
     int cursor_w = 12;
     int cursor_h = 19;
@@ -1770,6 +1959,245 @@ void update_cursor_atomic_combined(int new_x, int new_y) {
     compositor_composite_region(min_x, min_y, bw, bh);
 }
 
+static int compositor_threads = 1;
+
+typedef struct {
+    int thread_id;
+    int y_start;
+    int y_end;
+} compositor_worker_t;
+
+static pthread_t worker_threads[8];
+static compositor_worker_t worker_data[8];
+static pthread_barrier_t start_barrier;
+static pthread_barrier_t done_barrier;
+static bool worker_threads_active = false;
+static bool worker_threads_exit = false;
+
+
+#define MAX_COMPOSITE_SURFACES 128
+typedef struct {
+    surface_t *surf;   
+    int        x, y;
+    uint32_t   w, h;
+    uint32_t   buffer_w, buffer_h;
+    uint8_t    layer;
+    uint32_t   flags;
+    bool       mapped;
+    bool       focused;
+    bool       resize_preview_active;
+    uint32_t  *pixels;
+    bool       has_decorations;
+} surface_snapshot_t;
+
+static surface_snapshot_t g_surface_snapshots[MAX_COMPOSITE_SURFACES];
+static int g_surface_snapshot_count = 0;
+static pthread_mutex_t g_swap_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void build_surface_snapshot(void) {
+    g_surface_snapshot_count = 0;
+    surface_t *curr = surface_head;
+    while (curr && g_surface_snapshot_count < MAX_COMPOSITE_SURFACES) {
+        surface_snapshot_t *s = &g_surface_snapshots[g_surface_snapshot_count++];
+        s->surf    = curr;
+        s->x       = curr->x;
+        s->y       = curr->y;
+        s->w       = curr->w;
+        s->h       = curr->h;
+        s->buffer_w = curr->buffer_w;
+        s->buffer_h = curr->buffer_h;
+        s->layer   = curr->layer;
+        s->flags   = curr->flags;
+        s->mapped  = curr->mapped;
+        s->focused = curr->focused;
+        s->resize_preview_active = curr->resize_preview_active;
+        s->has_decorations = (curr->layer == 1 || curr->layer == 2);
+        if (curr->resize_preview_active && resize_preview_pixels) {
+            s->pixels   = resize_preview_pixels;
+            s->buffer_w = curr->w;
+            s->buffer_h = curr->h;
+        } else {
+            s->pixels = curr->pixels;
+        }
+        curr = curr->next;
+    }
+}
+
+static void compositor_render_band_pixels(int band_y_start, int band_y_end) {
+    int render_x = g_render_x;
+    int render_y = g_render_y;
+    int render_w = g_render_w;
+    int render_h = g_render_h;
+    bool partial_render = g_partial_render;
+
+    // Fill background solid Catppuccin color for rows in [band_y_start, band_y_end)
+    if (partial_render) {
+        int y1 = render_y < band_y_start ? band_y_start : render_y;
+        int y2 = (render_y + render_h) > band_y_end ? band_y_end : (render_y + render_h);
+        for (int y = y1; y < y2; y++) {
+            if (y < 0 || y >= screen_h) continue;
+            uint32_t *row = &back_buffer[y * screen_w];
+            int sx = render_x < 0 ? 0 : render_x;
+            int ex = (render_x + render_w) > screen_w ? screen_w : (render_x + render_w);
+            for (int x = sx; x < ex; x++) {
+                row[x] = 0xFF1E1E2E;
+            }
+        }
+    } else {
+        int y1 = band_y_start < 0 ? 0 : band_y_start;
+        int y2 = band_y_end > screen_h ? screen_h : band_y_end;
+        for (int y = y1; y < y2; y++) {
+            uint32_t *row = &back_buffer[y * screen_w];
+            for (int x = 0; x < screen_w; x++) {
+                row[x] = 0xFF1E1E2E;
+            }
+        }
+    }
+
+    for (int layer = 0; layer <= 5; layer++) {
+        for (int si = 0; si < g_surface_snapshot_count; si++) {
+            const surface_snapshot_t *s = &g_surface_snapshots[si];
+            if (!s->mapped || s->layer != layer) continue;
+
+            if (partial_render) {
+                int surf_vx, surf_vy, surf_vw, surf_vh;
+                int border = s->has_decorations ? BORDER_WIDTH : 0;
+                int titlebar = s->has_decorations ? (TITLEBAR_HEIGHT + BORDER_WIDTH) : 0;
+                surf_vx = s->x - border;
+                surf_vy = s->y - titlebar;
+                surf_vw = (int)s->w + border * 2;
+                surf_vh = (int)s->h + border + titlebar;
+                if (!rects_intersect(surf_vx, surf_vy, surf_vw, surf_vh, render_x, render_y, render_w, render_h))
+                    continue;
+            }
+
+            bool draw_decorations = s->has_decorations;
+
+            // Render titlebar if NORMAL or FLOATING window
+            if (draw_decorations) {
+                int outer_x = s->x - BORDER_WIDTH;
+                int outer_y = s->y - TITLEBAR_HEIGHT - BORDER_WIDTH;
+                int outer_w = s->w + BORDER_WIDTH * 2;
+                int outer_h = s->h + TITLEBAR_HEIGHT + BORDER_WIDTH * 2;
+
+                if (outer_y + outer_h > band_y_start && outer_y < band_y_end) {
+                    fill_rect_safe_band(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_w, TITLEBAR_HEIGHT + BORDER_WIDTH, 0xFFB0B0B0, band_y_start, band_y_end);
+                    fill_rect_safe_band(back_buffer, screen_w, screen_h, outer_x, s->y + (int)s->h, outer_w, BORDER_WIDTH, 0xFFB0B0B0, band_y_start, band_y_end);
+                    fill_rect_safe_band(back_buffer, screen_w, screen_h, outer_x, s->y, BORDER_WIDTH, s->h, 0xFFB0B0B0, band_y_start, band_y_end);
+                    fill_rect_safe_band(back_buffer, screen_w, screen_h, s->x + (int)s->w, s->y, BORDER_WIDTH, s->h, 0xFFB0B0B0, band_y_start, band_y_end);
+
+
+                    draw_line_v_safe_band(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_y + outer_h - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+                    draw_line_h_safe_band(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_x + outer_w - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+                    draw_line_v_safe_band(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF676767, band_y_start, band_y_end);
+                    draw_line_h_safe_band(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF676767, band_y_start, band_y_end);
+
+                    draw_line_v_safe_band(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_y + outer_h - 2, 0xFFFFFFFF, band_y_start, band_y_end);
+                    draw_line_h_safe_band(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_x + outer_w - 2, 0xFFFFFFFF, band_y_start, band_y_end);
+                    draw_line_v_safe_band(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF676767, band_y_start, band_y_end);
+                    draw_line_h_safe_band(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF676767, band_y_start, band_y_end);
+
+                    uint32_t t_start = s->focused ? active_titlebar_top : inactive_titlebar_top;
+                    uint32_t t_end   = s->focused ? active_titlebar_bottom : inactive_titlebar_bottom;
+                    int t_x = s->x;
+                    int t_y = s->y - TITLEBAR_HEIGHT;
+                    int t_w = s->w;
+                    int t_h = TITLEBAR_HEIGHT;
+
+                    fill_rect_safe_band(back_buffer, screen_w, screen_h, t_x, t_y, t_w, t_h, 0xFFB0B0B0, band_y_start, band_y_end);
+
+                    int title_w = get_title_text_width(s->surf->title);
+                    int title_block_w = 6 + 16 + 6 + title_w + 12;
+                    int max_title_block_w = t_w - 60;
+                    if (title_block_w > max_title_block_w) title_block_w = max_title_block_w;
+
+                    uint32_t grad_buf[1024];
+                    int copy_w = t_w < 1024 ? t_w : 1024;
+                    if (t_start == t_end) {
+                        for (int i = 0; i < copy_w; i++) grad_buf[i] = t_start;
+                    } else {
+                        for (int i = 0; i < copy_w; i++) {
+                            float t = (float)i / (copy_w > 1 ? copy_w - 1 : 1);
+                            grad_buf[i] = lerp_color(t_start, t_end, t);
+                        }
+                    }
+
+                    for (int py = t_y; py < t_y + t_h; py++) {
+                        if (py < band_y_start || py >= band_y_end || py < 0 || py >= screen_h) continue;
+                        int start_x = t_x < 0 ? 0 : t_x;
+                        int end_x = (t_x + copy_w) > screen_w ? screen_w : (t_x + copy_w);
+                        if (start_x >= end_x) continue;
+                        uint32_t *dst = &back_buffer[py * screen_w + start_x];
+                        const uint32_t *src = &grad_buf[start_x - t_x];
+                        memcpy(dst, src, (size_t)(end_x - start_x) * sizeof(uint32_t));
+                    }
+
+                    int line_start_x = t_x + title_block_w + 4;
+                    int line_end_x = t_x + t_w - 60;
+                    uint32_t line_color = s->focused ? active_titlebar_top : inactive_titlebar_top;
+                    if (line_start_x < line_end_x) {
+                        for (int offset = 3; offset <= 15; offset += 2) {
+                            draw_line_h_safe_band(back_buffer, screen_w, screen_h, line_start_x, t_y + offset, line_end_x, line_color, band_y_start, band_y_end);
+                        }
+                    }
+                    draw_decorations_icon_band(back_buffer, screen_w, screen_h, s->x + 6, t_y + (TITLEBAR_HEIGHT - 16) / 2, s->surf, band_y_start, band_y_end);
+                    uint32_t text_color = s->focused ? 0xFFFFFFFF : 0xFFC0C0C0;
+                    ui_draw_string_rect_band(back_buffer, screen_w, screen_h, s->x + 28, t_y, title_block_w - 34, TITLEBAR_HEIGHT, s->surf->title, text_color, band_y_start, band_y_end);
+                    int btn_y = t_y + (TITLEBAR_HEIGHT - 14) / 2;
+                    draw_title_button_band(back_buffer, screen_w, screen_h, s->x + s->w - 20, btn_y, 16, 14, 2, (pressed_button_surface_id == s->surf->surface_id && pressed_button_region == 2), band_y_start, band_y_end);
+                    draw_title_button_band(back_buffer, screen_w, screen_h, s->x + s->w - 38, btn_y, 16, 14, 1, (pressed_button_surface_id == s->surf->surface_id && pressed_button_region == 8), band_y_start, band_y_end);
+                    draw_title_button_band(back_buffer, screen_w, screen_h, s->x + s->w - 56, btn_y, 16, 14, 0, (pressed_button_surface_id == s->surf->surface_id && pressed_button_region == 4), band_y_start, band_y_end);
+                    int cx_left = s->x - 1;
+                    int cx_top  = s->y - 1;
+                    int cx_w    = s->w + 2;
+                    int cx_h    = s->h + 2;
+
+                    draw_line_h_safe_band(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF676767, band_y_start, band_y_end);
+                    draw_line_v_safe_band(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF676767, band_y_start, band_y_end);
+
+                    draw_line_h_safe_band(back_buffer, screen_w, screen_h, cx_left, cx_top + cx_h - 1, cx_left + cx_w - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+                    draw_line_v_safe_band(back_buffer, screen_w, screen_h, cx_left + cx_w - 1, cx_top, cx_top + cx_h - 1, 0xFFFFFFFF, band_y_start, band_y_end);
+                }
+            }
+
+            if (s->y + (int)s->h > band_y_start && s->y < band_y_end && s->pixels) {
+                surface_t temp = *s->surf;
+                temp.x       = s->x;
+                temp.y       = s->y;
+                temp.w       = s->w;
+                temp.h       = s->h;
+                temp.buffer_w = s->buffer_w;
+                temp.buffer_h = s->buffer_h;
+                temp.flags   = s->flags;
+                temp.pixels  = s->pixels;
+                if (partial_render) {
+                    int ix = 0, iy = 0, iw = 0, ih = 0;
+                    if (rect_intersect(s->x, s->y, (int)s->w, (int)s->h,
+                                       render_x, render_y, render_w, render_h,
+                                       &ix, &iy, &iw, &ih)) {
+                        blit_surface_pixels_band(&temp, ix, iy, iw, ih, band_y_start, band_y_end);
+                    }
+                } else {
+                    blit_surface_pixels_band(&temp, s->x, s->y, (int)s->w, (int)s->h, band_y_start, band_y_end);
+                }
+            }
+        }
+    }
+}
+
+static void *compositor_worker_loop(void *arg) {
+    int id = (int)(intptr_t)arg;
+    while (worker_threads_active) {
+        pthread_barrier_wait(&start_barrier);
+        if (worker_threads_exit) break;
+
+        compositor_render_band_pixels(worker_data[id].y_start, worker_data[id].y_end);
+
+        pthread_barrier_wait(&done_barrier);
+    }
+    return NULL;
+}
+
 // Compositor Render Loop
 void compositor_composite(void) {
     int cursor_w = 12;
@@ -1782,181 +2210,41 @@ void compositor_composite(void) {
         }
     }
 
-    int render_x = 0;
-    int render_y = 0;
-    int render_w = screen_w;
-    int render_h = screen_h;
-    bool partial_render = false;
+    g_render_x = 0;
+    g_render_y = 0;
+    g_render_w = screen_w;
+    g_render_h = screen_h;
+    g_partial_render = has_dirty_rect;
 
-    if (partial_render) {
-        render_x = dirty_x;
-        render_y = dirty_y;
-        render_w = dirty_w;
-        render_h = dirty_h;
+    if (g_partial_render) {
+        g_render_x = dirty_x;
+        g_render_y = dirty_y;
+        g_render_w = dirty_w;
+        g_render_h = dirty_h;
     }
 
-    // Fill background solid Catppuccin color
-    if (partial_render) {
-        for (int y = render_y; y < render_y + render_h; y++) {
-            uint32_t *row = &back_buffer[y * screen_w];
-            for (int x = render_x; x < render_x + render_w; x++) {
-                row[x] = 0xFF1E1E2E;
-            }
+    build_surface_snapshot();
+
+    if (compositor_threads > 1 && worker_threads_active) {
+        int band_h = screen_h / compositor_threads;
+        for (int i = 0; i < compositor_threads; i++) {
+            worker_data[i].y_start = i * band_h;
+            worker_data[i].y_end = (i == compositor_threads - 1) ? screen_h : (i + 1) * band_h;
         }
+
+        pthread_barrier_wait(&start_barrier);
+        // Main thread composites band 0
+        compositor_render_band_pixels(worker_data[0].y_start, worker_data[0].y_end);
+        pthread_barrier_wait(&done_barrier);
     } else {
-        for (int i = 0; i < screen_w * screen_h; i++) {
-            back_buffer[i] = 0xFF1E1E2E;
-        }
+        // Single-core fallback: 100% inline execution on main thread
+        compositor_render_band_pixels(0, screen_h);
     }
 
-    // Render surfaces in z-order (pass 0 up to 5)
-    for (int layer = 0; layer <= 5; layer++) {
-        surface_t *curr = surface_head;
-        while (curr) {
-            if (curr->mapped && curr->layer == layer) {
-                if (partial_render) {
-                    int surf_x = 0;
-                    int surf_y = 0;
-                    int surf_w = 0;
-                    int surf_h = 0;
-                    surface_visual_bounds(curr, &surf_x, &surf_y, &surf_w, &surf_h);
-                    if (!rects_intersect(surf_x, surf_y, surf_w, surf_h, render_x, render_y, render_w, render_h)) {
-                        curr = curr->next;
-                        continue;
-                    }
-                }
-
-                bool has_decorations = (layer == 1 || layer == 2);
-                bool dirty_inside_content =
-                    partial_render &&
-                    render_x >= curr->x &&
-                    render_y >= curr->y &&
-                    render_x + render_w <= curr->x + (int)curr->w &&
-                    render_y + render_h <= curr->y + (int)curr->h;
-                bool draw_decorations =
-                    has_decorations &&
-                    (!partial_render || !dirty_inside_content || (curr->flags & SURFACE_FLAG_TRANSPARENT));
-                uint32_t border_color = curr->focused ? active_border : inactive_border;
-
-                // Render titlebar if NORMAL or FLOATING window
-                if (draw_decorations) {
-                    int outer_x = curr->x - BORDER_WIDTH;
-                    int outer_y = curr->y - TITLEBAR_HEIGHT - BORDER_WIDTH;
-                    int outer_w = curr->w + BORDER_WIDTH * 2;
-                    int outer_h = curr->h + TITLEBAR_HEIGHT + BORDER_WIDTH * 2;
-                    
-                    fill_rect_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_w, outer_h, 0xFFB0B0B0);
-                    
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_y + outer_h - 1, 0xFFFFFFFF);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y, outer_x + outer_w - 1, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 1, outer_y, outer_y + outer_h - 1, 0xFF676767);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x, outer_y + outer_h - 1, outer_x + outer_w - 1, 0xFF676767);
-
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_y + outer_h - 2, 0xFFFFFFFF);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + 1, outer_x + outer_w - 2, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, outer_x + outer_w - 2, outer_y + 1, outer_y + outer_h - 2, 0xFF676767);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, outer_x + 1, outer_y + outer_h - 2, outer_x + outer_w - 2, 0xFF676767);
-                    uint32_t t_start = curr->focused ? active_titlebar_top : inactive_titlebar_top;
-                    uint32_t t_end = curr->focused ? active_titlebar_bottom : inactive_titlebar_bottom;
-                    int t_x = curr->x;
-                    int t_y = curr->y - TITLEBAR_HEIGHT;
-                    int t_w = curr->w;
-                    int t_h = TITLEBAR_HEIGHT;
-                    
-                    fill_rect_safe(back_buffer, screen_w, screen_h, t_x, t_y, t_w, t_h, 0xFFB0B0B0);
-                    
-                    int title_w = get_title_text_width(curr->title);
-                    int title_block_w = 6 + 16 + 6 + title_w + 12;
-                    int max_title_block_w = t_w - 60;
-                    if (title_block_w > max_title_block_w) {
-                        title_block_w = max_title_block_w;
-                    }
-                    
-                    for (int py = t_y; py < t_y + t_h; py++) {
-                        if (py < 0 || py >= screen_h) continue;
-                        uint32_t *row = &back_buffer[py * screen_w];
-                        for (int px = t_x; px < t_x + t_w; px++) {
-                            if (px < 0 || px >= screen_w) continue;
-                            float t = (float)(px - t_x) / (t_w > 1 ? t_w - 1 : 1);
-                            row[px] = lerp_color(t_start, t_end, t);
-                        }
-                    }
-                    
-                    int line_start_x = t_x + title_block_w + 4;
-                    int line_end_x = t_x + t_w - 60;
-                    uint32_t line_color = curr->focused ? active_titlebar_top : inactive_titlebar_top;
-                    if (line_start_x < line_end_x) {
-                        for (int offset = 3; offset <= 15; offset += 2) {
-                            draw_line_h_safe(back_buffer, screen_w, screen_h, line_start_x, t_y + offset, line_end_x, line_color);
-                        }
-                    }
-                    draw_decorations_icon(back_buffer, screen_w, screen_h, curr->x + 6, t_y + (TITLEBAR_HEIGHT - 16) / 2, curr);
-                    uint32_t text_color = curr->focused ? 0xFFFFFFFF : 0xFFC0C0C0;
-                    ui_draw_string_rect(back_buffer, screen_w, screen_h, curr->x + 28, t_y, title_block_w - 34, TITLEBAR_HEIGHT, curr->title, text_color);
-                    int btn_y = t_y + (TITLEBAR_HEIGHT - 14) / 2;
-                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 20, btn_y, 16, 14, 2, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 2)); // Close
-                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 38, btn_y, 16, 14, 1, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 8)); // Maximize
-                    draw_title_button(back_buffer, screen_w, screen_h, curr->x + curr->w - 56, btn_y, 16, 14, 0, (pressed_button_surface_id == curr->surface_id && pressed_button_region == 4)); // Minimize
-                    int cx_left = curr->x - 2;
-                    int cx_top = curr->y - 2;
-                    int cx_w = curr->w + 4;
-                    int cx_h = curr->h + 4;
-                    
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_left + cx_w - 1, 0xFF676767);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left, cx_top, cx_top + cx_h - 1, 0xFF676767);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_left + cx_w - 2, 0xFF676767);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + 1, cx_top + cx_h - 2, 0xFF676767);
-
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left, cx_top + cx_h - 1, cx_left + cx_w - 1, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 1, cx_top, cx_top + cx_h - 1, 0xFFFFFFFF);
-                    draw_line_h_safe(back_buffer, screen_w, screen_h, cx_left + 1, cx_top + cx_h - 2, cx_left + cx_w - 2, 0xFFFFFFFF);
-                    draw_line_v_safe(back_buffer, screen_w, screen_h, cx_left + cx_w - 2, cx_top + 1, cx_top + cx_h - 2, 0xFFFFFFFF);
-                }
-
-                // Blend client's mapped shm pixels onto backbuffer
-                uint32_t *blend_pixels = (curr->resize_preview_active && resize_preview_pixels) ? resize_preview_pixels : curr->pixels;
-                if (blend_pixels) {
-                    surface_t temp = *curr;
-                    temp.pixels = blend_pixels;
-                    if (blend_pixels == resize_preview_pixels) {
-                        temp.buffer_w = temp.w;
-                        temp.buffer_h = temp.h;
-                    }
-                    if (partial_render) {
-                        int ix = 0, iy = 0, iw = 0, ih = 0;
-                        if (rect_intersect(curr->x, curr->y, (int)curr->w, (int)curr->h,
-                                           render_x, render_y, render_w, render_h,
-                                           &ix, &iy, &iw, &ih)) {
-                            blit_surface_pixels(&temp, ix, iy, iw, ih);
-                        }
-                    } else {
-                        blit_surface_pixels(&temp, curr->x, curr->y, (int)curr->w, (int)curr->h);
-                    }
-                }
-            }
-            curr = curr->next;
-        }
-    }
-
-    // 1. Save clean pixels under the new cursor from back_buffer
-    uint32_t saved_pixels[12 * 19];
-    for (int y = 0; y < cursor_h; y++) {
-        int py = my + y;
-        uint32_t *bb_row = (py >= 0 && py < screen_h) ? &back_buffer[py * screen_w] : NULL;
-        for (int x = 0; x < cursor_w; x++) {
-            int px = mx + x;
-            if (bb_row && px >= 0 && px < screen_w) {
-                saved_pixels[y * cursor_w + x] = bb_row[px];
-            } else {
-                saved_pixels[y * cursor_w + x] = 0xFF1E1E2E;
-            }
-        }
-    }
-
-    // 2. Draw the cursor onto the back_buffer temporarily
+    // Draw cursor onto back_buffer
     draw_cursor(back_buffer, screen_w, screen_h, mx, my);
 
-    // 3. Blit backbuffer directly to hardware framebuffer mapped address space
+    // Blit backbuffer directly to hardware framebuffer mapped address space
     if (has_dirty_rect) {
         copy_box_to_fb(dirty_x, dirty_y, dirty_w, dirty_h);
         present_framebuffer(dirty_x, dirty_y, dirty_w, dirty_h);
@@ -1968,33 +2256,20 @@ void compositor_composite(void) {
         present_framebuffer(0, 0, screen_w, screen_h);
     }
 
-    // 4. Restore the clean pixels back to back_buffer
-    for (int y = 0; y < cursor_h; y++) {
-        int py = my + y;
-        if (py >= 0 && py < screen_h) {
-            uint32_t *bb_row = &back_buffer[py * screen_w];
-            for (int x = 0; x < cursor_w; x++) {
-                int px = mx + x;
-                if (px >= 0 && px < screen_w) {
-                    bb_row[px] = saved_pixels[y * cursor_w + x];
-                }
-            }
-        }
-    }
-
-    // 5. Update state
+    // Update state
     last_cursor_x = mx;
     last_cursor_y = my;
     cursor_visible = true;
-    
 }
 
 // Client IPC message handlers
 void handle_client_message(int fd, surface_t **surf_ptr) {
     NovaFrameHeader header;
-    uint8_t buffer[1024];
+    uint8_t stack_buf[1024];
+    uint8_t *buffer = stack_buf;
+    bool allocated = false;
 
-    memset(buffer, 0, sizeof(buffer));
+    memset(stack_buf, 0, sizeof(stack_buf));
 
     if (recv_all(fd, &header, sizeof(header)) < 0) {
         return;
@@ -2005,17 +2280,20 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     }
 
     if (header.payload_size > 0) {
-        uint32_t to_read = header.payload_size;
-        if (to_read > sizeof(buffer)) to_read = sizeof(buffer);
-
-        if (recv_all(fd, buffer, to_read) < 0) {
+        if (header.payload_size > 64 * 1024 * 1024) {
             return;
         }
 
-        if (header.payload_size > to_read) {
-            if (discard_socket_bytes(fd, header.payload_size - to_read) < 0) {
-                return;
-            }
+        if (header.payload_size > sizeof(stack_buf)) {
+            buffer = malloc(header.payload_size + 1);
+            if (!buffer) return;
+            memset(buffer, 0, header.payload_size + 1);
+            allocated = true;
+        }
+
+        if (recv_all(fd, buffer, header.payload_size) < 0) {
+            if (allocated) free(buffer);
+            return;
         }
     }
 
@@ -2041,7 +2319,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             surf->mapped = false;
             surf->resize_last_request_ms = 0;
 
-            snprintf(surf->shm_path, sizeof(surf->shm_path), "/dev/shm/nova_surf_%d_%d_%u", getpid(), fd, surf->surface_id);
+            snprintf(surf->shm_path, sizeof(surf->shm_path), "/dev/shm/nova_surf_%d_%u_%llu", getpid(), surf->surface_id, (unsigned long long)g_shm_sequence_id++);
             int shm_fd = open(surf->shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
             if (shm_fd < 0) {
                 unlink(surf->shm_path);
@@ -2052,6 +2330,22 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                 surf->shm_size = sz;
                 surf->pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
                 close(shm_fd);
+                if (surf->pixels == MAP_FAILED) {
+                    surf->pixels = NULL;
+                }
+            }
+
+            if (!surf->pixels) {
+                unlink(surf->shm_path);
+                free(surf);
+                struct {
+                    uint32_t surface_id;
+                    char shm_path[108];
+                } __attribute__((packed)) err_reply;
+                err_reply.surface_id = 0;
+                err_reply.shm_path[0] = '\0';
+                send_frame(fd, MSG_CREATE_SURFACE, 0, &err_reply, sizeof(err_reply));
+                break;
             }
 
             // Window decoration rules (Normal windows are centered, overlaid layers at 0,0)
@@ -2066,21 +2360,19 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             surface_add(surf);
             *surf_ptr = surf;
 
-            // Focus normal windows on creation
-            if (surf->layer == 1 || surf->layer == 2) {
-                set_focus(surf);
-            }
-
-            // Reply to client
             struct {
                 uint32_t surface_id;
                 char shm_path[108];
             } __attribute__((packed)) reply;
             reply.surface_id = surf->surface_id;
             strcpy(reply.shm_path, surf->shm_path);
-
             send_frame(fd, MSG_CREATE_SURFACE, surf->surface_id, &reply, sizeof(reply));
+
             broadcast_window_event(EVT_WINDOW_CREATED, surf);
+
+            if (surf->layer == 1 || surf->layer == 2) {
+                set_focus(surf);
+            }
             break;
         }
 
@@ -2094,25 +2386,35 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             if (surf) {
                 surf->pending_w = p->w;
                 surf->pending_h = p->h;
-                snprintf(surf->pending_shm_path, sizeof(surf->pending_shm_path), "/dev/shm/nova_surf_%d_%d_%u_v2", getpid(), fd, surf->surface_id);
+                snprintf(surf->pending_shm_path, sizeof(surf->pending_shm_path), "/dev/shm/nova_surf_%d_%u_%llu", getpid(), surf->surface_id, (unsigned long long)g_shm_sequence_id++);
 
                 int shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
                 if (shm_fd < 0) {
                     unlink(surf->pending_shm_path);
                     shm_fd = open(surf->pending_shm_path, O_RDWR | O_CREAT | O_EXCL, 0777);
                 }
+                uint32_t *pending_px = NULL;
                 if (shm_fd >= 0) {
                     uint32_t sz = p->w * p->h * 4;
-                    surf->pending_pixels = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+                    pending_px = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
                     close(shm_fd);
+                    if (pending_px == MAP_FAILED) pending_px = NULL;
                 }
 
-                struct {
-                    char shm_path[108];
-                } __attribute__((packed)) reply;
-                strcpy(reply.shm_path, surf->pending_shm_path);
-
-                send_frame(fd, MSG_RESIZE_SURFACE, surf->surface_id, &reply, sizeof(reply));
+                if (!pending_px) {
+                    unlink(surf->pending_shm_path);
+                    surf->pending_shm_path[0] = '\0';
+                    struct { char shm_path[108]; } __attribute__((packed)) err_reply;
+                    err_reply.shm_path[0] = '\0';
+                    send_frame(fd, MSG_RESIZE_SURFACE, surf->surface_id, &err_reply, sizeof(err_reply));
+                } else {
+                    surf->pending_pixels = pending_px;
+                    struct {
+                        char shm_path[108];
+                    } __attribute__((packed)) reply;
+                    strcpy(reply.shm_path, surf->pending_shm_path);
+                    send_frame(fd, MSG_RESIZE_SURFACE, surf->surface_id, &reply, sizeof(reply));
+                }
             }
             break;
         }
@@ -2133,6 +2435,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                 }
                 // If there's a pending resized canvas committed, finalize swap
                 if (surf->pending_pixels) {
+                    pthread_mutex_lock(&g_swap_mutex);
                     // Unmap old shm surface
                     if (surf->pixels) {
                         munmap(surf->pixels, surf->shm_size);
@@ -2151,6 +2454,8 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                     surf->pending_pixels = NULL;
                     surf->pending_shm_path[0] = '\0';
                     surf->resize_preview_active = false;
+
+                    pthread_mutex_unlock(&g_swap_mutex);
 
                     if (surf->resize_request_queued) {
                         queue_resize_request(surf, surf->resize_desired_w, surf->resize_desired_h, surf->resize_force_next_request);
@@ -2199,9 +2504,17 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
             } __attribute__((packed)) *p = (void *)buffer;
 
             surface_t *surf = surface_find(p->surface_id);
-            if (surf) {
+            if (surf && (surf->x != p->x || surf->y != p->y)) {
+                int vx = 0, vy = 0, vw = 0, vh = 0;
+                surface_visual_bounds(surf, &vx, &vy, &vw, &vh);
+                mark_dirty_rect(vx, vy, vw, vh);
+
                 surf->x = p->x;
                 surf->y = p->y;
+
+                surface_visual_bounds(surf, &vx, &vy, &vw, &vh);
+                mark_dirty_rect(vx, vy, vw, vh);
+                needs_composite = true;
             }
             break;
         }
@@ -2378,6 +2691,10 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
         default:
             break;
     }
+
+    if (allocated) {
+        free(buffer);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -2432,7 +2749,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Initialize UI fonts
+    ntk_style_apply(ntk_style_new());
     ui_font_init("/Library/Fonts/Proggy.ttf", 13);
 
     // Set up signals via self-pipe
@@ -2481,6 +2798,30 @@ int main(int argc, char *argv[]) {
     // Initial mouse center coordinates
     mx = screen_w / 2;
     my = screen_h / 2;
+
+    // VFS CPU core count detection and compositor thread pool initialization
+    long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online_cpus > 1) {
+        compositor_threads = (int)online_cpus;
+        if (compositor_threads > 8) compositor_threads = 8;
+    } else {
+        compositor_threads = 1;
+    }
+
+    printf("Nova Compositor: Online CPUs: %ld via VFS /proc/cpuinfo. Mode: %s (%d thread%s)\n",
+           online_cpus, compositor_threads > 1 ? "Multithreaded Parallel Banding" : "Single-Core Inline Fallback",
+           compositor_threads, compositor_threads > 1 ? "s" : "");
+
+    if (compositor_threads > 1) {
+        pthread_barrier_init(&start_barrier, NULL, compositor_threads);
+        pthread_barrier_init(&done_barrier, NULL, compositor_threads);
+        worker_threads_active = true;
+
+        for (int i = 1; i < compositor_threads; i++) {
+            worker_data[i].thread_id = i;
+            pthread_create(&worker_threads[i], NULL, compositor_worker_loop, (void *)(intptr_t)i);
+        }
+    }
 
     // Autostart shell elements (Shelf, Topbar, Launch list)
     for (int i = 0; i < autostart_count; i++) {
@@ -2698,7 +3039,7 @@ int main(int argc, char *argv[]) {
                                         }
 
                                         if (click_region == 1) {
-                                            uint32_t click_time = get_ticks() * 16;
+                                            uint32_t click_time = get_ticks();
                                             if (hovered->surface_id == last_titlebar_click_surf_id &&
                                                 click_time - last_titlebar_click_ms < 250) {
                                                 toggle_maximize(hovered);
@@ -2759,6 +3100,9 @@ int main(int argc, char *argv[]) {
 
                                         int new_vis_x, new_vis_y, new_vis_w, new_vis_h;
                                         surface_visual_bounds(focused, &new_vis_x, &new_vis_y, &new_vis_w, &new_vis_h);
+
+                                        mark_dirty_rect(old_vis_x, old_vis_y, old_vis_w, old_vis_h);
+                                        mark_dirty_rect(new_vis_x, new_vis_y, new_vis_w, new_vis_h);
 
                                         if (try_fast_translate_drag(focused, old_vis_x, old_vis_y, old_vis_w, old_vis_h,
                                                                     new_vis_x, new_vis_y, new_vis_w, new_vis_h)) {
@@ -2879,14 +3223,23 @@ int main(int argc, char *argv[]) {
                 else if (poll_fds[i].fd == server_fd) {
                     int client_fd = accept(server_fd, NULL, NULL);
                     if (client_fd >= 0) {
-                        // Store descriptor inside list
+                        // Set non-blocking so sends to slow clients don't stall the compositor
+                        int flags = fcntl(client_fd, F_GETFL, 0);
+                        if (flags >= 0) fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
+                        // Grow client list dynamically if needed
+                        bool stored = false;
                         for (int k = 0; k < MAX_CLIENTS; k++) {
                             if (!clients[k].active) {
                                 clients[k].fd = client_fd;
                                 clients[k].active = true;
                                 client_count++;
+                                stored = true;
                                 break;
                             }
+                        }
+                        if (!stored) {
+                            close(client_fd);
                         }
                     }
                 }
@@ -2896,12 +3249,23 @@ int main(int argc, char *argv[]) {
                     int client_fd = poll_fds[i].fd;
                     surface_t *surf = client_surfaces[i];
                     handle_client_message(client_fd, &surf);
-                    needs_composite = true;
                 }
             } else if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
-                // Client closed socket connection
                 int client_fd = poll_fds[i].fd;
-                
+                bool is_disconnected = (poll_fds[i].revents & POLLERR) != 0;
+                if (!is_disconnected) {
+                    char drain_buf[256];
+                    ssize_t drain_rc;
+                    while ((drain_rc = recv(client_fd, drain_buf, sizeof(drain_buf), 0)) > 0);
+                    if (drain_rc == 0) {
+                        is_disconnected = true;
+                    } else if (drain_rc < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                        is_disconnected = true;
+                    }
+                }
+
+                if (!is_disconnected) continue;
+
                 // Release active client list slot
                 for (int k = 0; k < MAX_CLIENTS; k++) {
                     if (clients[k].active && clients[k].fd == client_fd) {
@@ -2922,7 +3286,7 @@ int main(int argc, char *argv[]) {
                             munmap(curr->pixels, curr->shm_size);
                         }
                         unlink(curr->shm_path);
-                        
+
                         if (curr->pending_pixels) {
                             munmap(curr->pending_pixels, curr->pending_w * curr->pending_h * 4);
                             unlink(curr->pending_shm_path);
@@ -3061,6 +3425,12 @@ int main(int argc, char *argv[]) {
     }
 
     // Clean up
+    for (int i = 0; i < autostart_count; i++) {
+        if (autostarts[i].pid > 0) {
+            kill(autostarts[i].pid, SIGTERM);
+        }
+    }
+
     if (kbd_fd >= 0) close(kbd_fd);
     if (mouse_fd >= 0) close(mouse_fd);
     close(server_fd);

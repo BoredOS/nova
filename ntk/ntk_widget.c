@@ -326,7 +326,22 @@ void ntk_widget_lower(NtkWidget *w) {
     ntk_widget_reorder_child(w->parent, w, 0);
 }
 void ntk_widget_set_geometry(NtkWidget *w, NtkRect rect) {
-    if (w) { w->geometry = rect; w->needs_repaint = true; }
+    if (!w) return;
+    bool size_changed = (w->geometry.width != rect.width || w->geometry.height != rect.height);
+    w->geometry = rect;
+    w->needs_repaint = true;
+    if (size_changed) {
+        NtkEvent rev;
+        memset(&rev, 0, sizeof(rev));
+        rev.type = NTK_EVENT_RESIZE;
+        rev.width = rect.width;
+        rev.height = rect.height;
+        rev.target = w;
+        const NtkWidgetClass *klass = ntk_widget_get_class(w);
+        if (klass && klass->handle_event) {
+            klass->handle_event(w, &rev);
+        }
+    }
 }
 
 NtkRect ntk_widget_get_geometry(NtkWidget *w) {
@@ -338,7 +353,9 @@ void ntk_widget_set_position(NtkWidget *w, int x, int y) {
 }
 
 void ntk_widget_set_size(NtkWidget *w, int width, int height) {
-    if (w) { w->geometry.width = width; w->geometry.height = height; w->needs_repaint = true; }
+    if (w) {
+        ntk_widget_set_geometry(w, NTK_RECT(w->geometry.x, w->geometry.y, width, height));
+    }
 }
 
 NtkPoint ntk_widget_get_position(NtkWidget *w) {

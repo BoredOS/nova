@@ -57,9 +57,13 @@ static inline void painter_set_pixel(NtkPainter *p, int x, int y, NtkColor color
     uint8_t dr = ntk_color_r(d), dg = ntk_color_g(d), db = ntk_color_b(d);
 
     uint32_t inv_a = 255 - sa;
-    uint8_t or = (uint8_t)((sr * sa + dr * inv_a) / 255);
-    uint8_t og = (uint8_t)((sg * sa + dg * inv_a) / 255);
-    uint8_t ob = (uint8_t)((sb * sa + db * inv_a) / 255);
+    uint32_t r_blend = (uint32_t)sr * sa + (uint32_t)dr * inv_a;
+    uint32_t g_blend = (uint32_t)sg * sa + (uint32_t)dg * inv_a;
+    uint32_t b_blend = (uint32_t)sb * sa + (uint32_t)db * inv_a;
+
+    uint8_t or = (uint8_t)((r_blend + 1 + (r_blend >> 8)) >> 8);
+    uint8_t og = (uint8_t)((g_blend + 1 + (g_blend >> 8)) >> 8);
+    uint8_t ob = (uint8_t)((b_blend + 1 + (b_blend >> 8)) >> 8);
 
     *dst = 0xFF000000 | ((uint32_t)or << 16) | ((uint32_t)og << 8) | ob;
 }
@@ -563,40 +567,53 @@ void ntk_painter_draw_pixmap(NtkPainter *p, NtkPixmap *pm, int x, int y) {
     int pw = ntk_pixmap_get_width(pm);
     int ph = ntk_pixmap_get_height(pm);
     unsigned char *data = ntk_pixmap_get_data(pm);
-    if (!data) return;
+    if (!data || pw <= 0 || ph <= 0) return;
 
     uint32_t *src = (uint32_t *)data;
     for (int sy = 0; sy < ph; sy++) {
+        const uint32_t *src_row = &src[sy * pw];
+        int py = y + sy;
         for (int sx = 0; sx < pw; sx++) {
-            uint32_t pixel = src[sy * pw + sx];
+            uint32_t pixel = src_row[sx];
             if (ntk_color_a(pixel) > 0) {
-                painter_set_pixel(p, x + sx, y + sy, pixel);
+                painter_set_pixel(p, x + sx, py, pixel);
             }
         }
     }
 }
 
 void ntk_painter_draw_pixmap_scaled(NtkPainter *p, NtkPixmap *pm, NtkRect dest) {
-    if (!p || !pm) return;
+    if (!p || !pm || dest.width <= 0 || dest.height <= 0) return;
 
     int pw = ntk_pixmap_get_width(pm);
     int ph = ntk_pixmap_get_height(pm);
     unsigned char *data = ntk_pixmap_get_data(pm);
     if (!data || pw <= 0 || ph <= 0) return;
 
+    int *src_x_table = malloc((size_t)dest.width * sizeof(int));
+    if (!src_x_table) return;
+
+    for (int dx = 0; dx < dest.width; dx++) {
+        int sx = (int)((uint64_t)dx * (uint64_t)pw / (uint64_t)dest.width);
+        if (sx >= pw) sx = pw - 1;
+        src_x_table[dx] = sx;
+    }
+
     uint32_t *src = (uint32_t *)data;
     for (int dy = 0; dy < dest.height; dy++) {
         int sy = (int)((uint64_t)dy * (uint64_t)ph / (uint64_t)dest.height);
         if (sy >= ph) sy = ph - 1;
+        int py = dest.y + dy;
+        const uint32_t *src_row = &src[sy * pw];
         for (int dx = 0; dx < dest.width; dx++) {
-            int sx = (int)((uint64_t)dx * (uint64_t)pw / (uint64_t)dest.width);
-            if (sx >= pw) sx = pw - 1;
-            uint32_t pixel = src[sy * pw + sx];
+            uint32_t pixel = src_row[src_x_table[dx]];
             if (ntk_color_a(pixel) > 0) {
-                painter_set_pixel(p, dest.x + dx, dest.y + dy, pixel);
+                painter_set_pixel(p, dest.x + dx, py, pixel);
             }
         }
     }
+
+    free(src_x_table);
 }
 void ntk_painter_draw_text(NtkPainter *p, const char *text, int x, int y) {
     if (!p || !text || !p->font) return;

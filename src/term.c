@@ -13,11 +13,10 @@
 
 #include <stb_truetype.h>
 #include "utf-8.h"
-
-int sys_pty_create(void);
-int sys_pty_destroy(int pty_id);
-int sys_tty_read_out(int tty_id, char *buf, int len);
-int sys_tty_write_in(int tty_id, const char *buf, int len);
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 
 #define SPAWN_FLAG_TERMINAL     0x1
 #define SPAWN_FLAG_INHERIT_TTY  0x2
@@ -35,6 +34,7 @@ typedef struct {
 
 typedef struct {
     int pty_id;
+    int master_fd;
     int cols;
     int rows;
     int cursor_x;
@@ -67,6 +67,9 @@ typedef struct {
     int esc_state;
     int esc_params[8];
     int esc_num_params;
+
+    uint32_t *back_buffer;
+    int back_buffer_size;
 } term_t;
 
 typedef struct {
@@ -436,7 +439,7 @@ static void process_char(term_t *term, uint32_t codepoint) {
             if (term->esc_params[0] == 6) {
                 char buf[32];
                 int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dR", term->cursor_y + 1, term->cursor_x + 1);
-                sys_tty_write_in(term->pty_id, buf, len);
+                write(term->master_fd, buf, len);
             }
         } else if (codepoint == 's') {
             term->saved_x = term->cursor_x;
@@ -528,30 +531,30 @@ static void on_key_press(NtkWidget *widget, NtkEvent *event, term_t *term) {
     if (mods & NTK_MOD_CTRL) {
         if (kc >= KEY_A && kc <= KEY_Z) {
             char ctrl_char = (char)(kc - KEY_A + 1);
-            sys_tty_write_in(term->pty_id, &ctrl_char, 1);
+            write(term->master_fd, &ctrl_char, 1);
             return;
         }
     }
 
     if (kc == KEY_UP) {
-        sys_tty_write_in(term->pty_id, "\x1b[A", 3);
+        write(term->master_fd, "\x1b[A", 3);
     } else if (kc == KEY_DOWN) {
-        sys_tty_write_in(term->pty_id, "\x1b[B", 3);
+        write(term->master_fd, "\x1b[B", 3);
     } else if (kc == KEY_RIGHT) {
-        sys_tty_write_in(term->pty_id, "\x1b[C", 3);
+        write(term->master_fd, "\x1b[C", 3);
     } else if (kc == KEY_LEFT) {
-        sys_tty_write_in(term->pty_id, "\x1b[D", 3);
+        write(term->master_fd, "\x1b[D", 3);
     } else if (kc == KEY_ENTER) {
-        sys_tty_write_in(term->pty_id, "\r", 1);
+        write(term->master_fd, "\r", 1);
     } else if (kc == KEY_ESCAPE) {
-        sys_tty_write_in(term->pty_id, "\x1b", 1);
+        write(term->master_fd, "\x1b", 1);
     } else if (kc == KEY_BACKSPACE) {
         char bs = 127;
-        sys_tty_write_in(term->pty_id, &bs, 1);
+        write(term->master_fd, &bs, 1);
     } else if (kc == KEY_TAB) {
-        sys_tty_write_in(term->pty_id, "\t", 1);
+        write(term->master_fd, "\t", 1);
     } else if (event->text[0] != '\0') {
-        sys_tty_write_in(term->pty_id, event->text, strlen(event->text));
+        write(term->master_fd, event->text, strlen(event->text));
     }
 }
 
@@ -615,6 +618,10 @@ static void draw_cell_fast(struct NtkPainter *p, int gx, int gy, term_cell_t cel
         clip_y1 = p->clip.y;
         clip_x2 = p->clip.x + p->clip.width;
         clip_y2 = p->clip.y + p->clip.height;
+        if (clip_x1 < 0) clip_x1 = 0;
+        if (clip_y1 < 0) clip_y1 = 0;
+        if (clip_x2 > p->width) clip_x2 = p->width;
+        if (clip_y2 > p->height) clip_y2 = p->height;
     }
 
     if (gx + cell_w <= clip_x1 || gy + cell_h <= clip_y1 || gx >= clip_x2 || gy >= clip_y2) return;
@@ -700,6 +707,10 @@ static void draw_cursor_fast(struct NtkPainter *p, term_t *term) {
             clip_y1 = p->clip.y;
             clip_x2 = p->clip.x + p->clip.width;
             clip_y2 = p->clip.y + p->clip.height;
+            if (clip_x1 < 0) clip_x1 = 0;
+            if (clip_y1 < 0) clip_y1 = 0;
+            if (clip_x2 > p->width) clip_x2 = p->width;
+            if (clip_y2 > p->height) clip_y2 = p->height;
         }
 
         for (int y = 0; y < cell_h; y++) {
@@ -727,9 +738,22 @@ static void draw_cursor_fast(struct NtkPainter *p, term_t *term) {
 static void on_canvas_draw(NtkCanvas *canvas, NtkPainter *painter, term_t *term) {
     (void)canvas;
     
+    int total_pixels = painter->width * painter->height;
+    if (total_pixels <= 0) return;
+
+    if (!term->back_buffer || term->back_buffer_size < total_pixels) {
+        free(term->back_buffer);
+        term->back_buffer = malloc((size_t)total_pixels * sizeof(uint32_t));
+        term->back_buffer_size = total_pixels;
+    }
+    if (!term->back_buffer) return;
+
+    NtkPainter offscreen_painter = *painter;
+    offscreen_painter.buffer = term->back_buffer;
+
     uint32_t bg_color = term->bg_color;
-    for (int i = 0; i < painter->width * painter->height; i++) {
-        painter->buffer[i] = bg_color;
+    for (int i = 0; i < total_pixels; i++) {
+        term->back_buffer[i] = bg_color;
     }
 
     for (int r = 0; r < term->rows; r++) {
@@ -737,11 +761,13 @@ static void on_canvas_draw(NtkCanvas *canvas, NtkPainter *painter, term_t *term)
             term_cell_t cell = get_viewport_cell(term, r, c);
             int gx = c * cell_width;
             int gy = r * cell_height;
-            draw_cell_fast(painter, gx, gy, cell, bg_color);
+            draw_cell_fast(&offscreen_painter, gx, gy, cell, bg_color);
         }
     }
 
-    draw_cursor_fast(painter, term);
+    draw_cursor_fast(&offscreen_painter, term);
+
+    memcpy(painter->buffer, term->back_buffer, (size_t)total_pixels * sizeof(uint32_t));
 }
 
 static bool terminal_handle_event(NtkWidget *w, NtkEvent *e) {
@@ -794,7 +820,7 @@ static void on_pty_data(int fd, void *userdata) {
     char buf[4096];
     bool got_data = false;
     while (1) {
-        int len = sys_tty_read_out(term->pty_id, buf, sizeof(buf));
+        int len = read(term->master_fd, buf, sizeof(buf));
         if (len <= 0) break;
         got_data = true;
 
@@ -880,7 +906,12 @@ int main(void) {
         ntk_app_destroy(app);
         return 1;
     }
+    NtkStyle *win_style = ntk_widget_get_style(win);
+    if (win_style) {
+        ntk_style_set_color(win_style, NTK_STYLE_ROLE_WINDOW_BG, dummy.bg_color);
+    }
     NtkWidget *vbox = ntk_box_new(NTK_VERTICAL, win);
+
     ntk_window_set_content(win, vbox);
 
     NtkWidget *term_widget = ntk_widget_new_with_class(vbox, &terminal_widget_class, sizeof(term_t));
@@ -914,9 +945,9 @@ int main(void) {
 
     term->scrollback = calloc(term->scrollback_max, sizeof(term_line_t));
 
-    term->pty_id = sys_pty_create();
-    if (term->pty_id < 0) {
-        printf("Failed to create PTY\n");
+    term->master_fd = open("/dev/ptmx", O_RDWR);
+    if (term->master_fd < 0) {
+        printf("Failed to create PTY master\n");
         free(term->screen_grid);
         free(term->scrollback);
         if (font_data) free(font_data);
@@ -924,10 +955,23 @@ int main(void) {
         return 1;
     }
 
+    int pty_num = 0;
+    if (ioctl(term->master_fd, 0x80045430 /* TIOCGPTN */, &pty_num) < 0) {
+        pty_num = 0;
+    }
+    term->pty_id = 1024 + pty_num;
+
+    struct winsize ws;
+    ws.ws_row = term->rows;
+    ws.ws_col = term->cols;
+    ws.ws_xpixel = term->cols * cell_width;
+    ws.ws_ypixel = term->rows * cell_height;
+    ioctl(term->master_fd, TIOCSWINSZ, &ws);
+
     int child_pid = sys_spawn("/bin/bsh.elf", NULL, SPAWN_FLAG_TERMINAL | SPAWN_FLAG_TTY_ID, term->pty_id);
     if (child_pid <= 0) {
         printf("Failed to spawn shell /bin/bsh.elf\n");
-        sys_pty_destroy(term->pty_id);
+        close(term->master_fd);
         free(term->screen_grid);
         free(term->scrollback);
         if (font_data) free(font_data);
@@ -937,12 +981,12 @@ int main(void) {
 
     ntk_widget_set_focus(term_widget);
 
-    ntk_app_set_custom_poll_fd(term->pty_id, on_pty_data, term_widget);
+    ntk_app_set_custom_poll_fd(term->master_fd, on_pty_data, term_widget);
 
     ntk_widget_show(win);
     ntk_app_run(app);
 
-    sys_pty_destroy(term->pty_id);
+    close(term->master_fd);
     free(term->screen_grid);
     if (term->scrollback) {
         for (int i = 0; i < term->scrollback_count; i++) {
@@ -950,7 +994,6 @@ int main(void) {
         }
         free(term->scrollback);
     }
-    if (font_data) free(font_data);
     ntk_app_destroy(app);
     return 0;
 }

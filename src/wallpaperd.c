@@ -123,14 +123,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    for (int i = 0; i < screen_sz.width * screen_sz.height; i++) {
-        pixels[i] = desktop_bg;
+    if (!load_and_scale_wallpaper(wallpaper_path, pixels, screen_sz.width, screen_sz.height)) {
+        for (int i = 0; i < screen_sz.width * screen_sz.height; i++) {
+            pixels[i] = desktop_bg;
+        }
     }
 
-    // Load and scale image to screen buffer
-    load_and_scale_wallpaper(wallpaper_path, pixels, screen_sz.width, screen_sz.height);
-
-    // Damage entire surface to draw it
     NtkRect damage = NTK_RECT(0, 0, screen_sz.width, screen_sz.height);
     ntk_nova_damage_surface(fd, surf_id, 1, &damage);
 
@@ -141,6 +139,9 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         int pr = poll(&pfd, 1, 1000);
+        if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            break;
+        }
         if (pr > 0 && (pfd.revents & POLLIN)) {
             NtkEvent ev;
             if (ntk_nova_poll_event(fd, &ev) < 0) {

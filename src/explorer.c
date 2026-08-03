@@ -685,7 +685,7 @@ static const ExtensionIcon extension_icons[] = {
     {"db", "filetype-db.png"}, {"sqlite", "filetype-db.png"},
     {"sqlite3", "filetype-db.png"}, {"so", "filetype-library.png"},
     {"a", "filetype-library.png"}, {"o", "filetype-object.png"},
-    {"obj", "filetype-object.png"}, {"elf", "filetype-executable.png"},
+    {"obj", "filetype-object.png"},
     {"wasm", "filetype-wasm.png"}, {"ttf", "filetype-truetype.png"},
     {"otf", "filetype-truetype.png"}, {"ini", "filetype-ini.png"},
     {"conf", "filetype-ini.png"}, {"cfg", "filetype-ini.png"},
@@ -726,6 +726,9 @@ static const char *file_icon_name(FileManager *manager,
 
     const char *dot = strrchr(name, '.');
     if (dot && dot[1]) {
+        if (strcasecmp(dot + 1, "elf") == 0) {
+            return "filetype-executable.png";
+        }
         for (size_t index = 0;
              index < sizeof(extension_icons) / sizeof(extension_icons[0]);
              ++index) {
@@ -748,8 +751,10 @@ static NtkPixmap *icon_cache_load(FileManager *manager, const char *path) {
     NtkPixmap *pixmap = ntk_pixmap_new_from_file(path);
     if (!pixmap && strstr(path, "filetype-unknown.png") == NULL) {
         // Not every Serenity set ships every file type icon.
-        pixmap = ntk_pixmap_new_from_file(
-            SERENITY_32 "filetype-unknown.png");
+        const char *fallback = strstr(path, "/16x16/")
+                                   ? SERENITY_16 "filetype-unknown.png"
+                                   : SERENITY_32 "filetype-unknown.png";
+        pixmap = ntk_pixmap_new_from_file(fallback);
     }
     if (!pixmap || manager->icon_cache_count >= ICON_CACHE_MAX) return pixmap;
 

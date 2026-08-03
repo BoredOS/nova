@@ -9,6 +9,7 @@
 #include "ntk_color.h"
 NtkPixmap*      ntk_pixmap_new(int width, int height);
 NtkPixmap*      ntk_pixmap_new_from_file(const char *path);
+NtkPixmap*      ntk_pixmap_new_thumbnail_from_file(const char *path, int max_width, int max_height);
 NtkPixmap*      ntk_pixmap_new_from_data(unsigned char *data, int width, int height, int stride, NtkPixelFormat format);
 NtkPixmap*      ntk_pixmap_clone(NtkPixmap *pm);
 void            ntk_pixmap_destroy(NtkPixmap *pm);

@@ -140,6 +140,7 @@ struct FileManager {
     ImagePreviewCacheEntry preview_cache[IMAGE_PREVIEW_CACHE_MAX];
     size_t preview_cache_count;
     size_t preview_cache_next;
+    uint32_t preview_timer_id;
 };
 
 static FileManager *g_file_manager;
@@ -165,6 +166,8 @@ static void action_properties(FileManager *manager);
 static void action_create_archive(FileManager *manager);
 static void action_extract_archive(FileManager *manager);
 static bool extension_matches(const char *path, const char *extension);
+static void file_manager_relayout(FileManager *manager);
+static void image_preview_schedule(FileManager *manager);
 
 // Normalize a path by resolving "." and ".." components, and ensuring it is absolute
 static bool path_normalize(char *output,
@@ -791,6 +794,10 @@ static bool image_preview_supported(const char *path) {
 }
 
 static void image_preview_cache_clear(FileManager *manager) {
+    if (manager->preview_timer_id) {
+        ntk_app_kill_timer(manager->preview_timer_id);
+        manager->preview_timer_id = 0;
+    }
     for (size_t index = 0; index < manager->preview_cache_count; ++index) {
         free(manager->preview_cache[index].path);
         ntk_pixmap_destroy(manager->preview_cache[index].pixmap);
@@ -818,38 +825,47 @@ static ImagePreviewCacheEntry *image_preview_cache_add(FileManager *manager,
     return &manager->preview_cache[slot];
 }
 
-static NtkPixmap *image_preview(FileManager *manager, const FileEntry *entry) {
-    if (manager->archive_mode || entry->info.is_directory ||
-        entry->info.size > IMAGE_PREVIEW_MAX_FILE_SIZE ||
-        !image_preview_supported(entry->path)) {
-        return NULL;
-    }
-
+static ImagePreviewCacheEntry *image_preview_cache_find(
+    FileManager *manager,
+    const char *path) {
     for (size_t index = 0; index < manager->preview_cache_count; ++index) {
         if (manager->preview_cache[index].path &&
-            strcmp(manager->preview_cache[index].path, entry->path) == 0) {
-            return manager->preview_cache[index].pixmap;
+            strcmp(manager->preview_cache[index].path, path) == 0) {
+            return &manager->preview_cache[index];
         }
     }
+    return NULL;
+}
+
+static bool image_preview_eligible(FileManager *manager,
+                                   const FileEntry *entry) {
+    return !manager->archive_mode && !entry->info.is_directory &&
+           entry->info.size <= IMAGE_PREVIEW_MAX_FILE_SIZE &&
+           image_preview_supported(entry->path);
+}
+
+static bool image_preview_load(FileManager *manager, const FileEntry *entry) {
+    if (image_preview_cache_find(manager, entry->path)) return true;
 
     // Keep failed decodes in the cache too, otherwise a broken image is retried
     // every time the viewport repaints.
     ImagePreviewCacheEntry *cache_entry =
         image_preview_cache_add(manager, entry->path);
-    if (!cache_entry) return NULL;
+    if (!cache_entry) return false;
 
-    NtkPixmap *source = ntk_pixmap_new_from_file(entry->path);
-    if (!source) return NULL;
+    cache_entry->pixmap = ntk_pixmap_new_thumbnail_from_file(entry->path, 48, 40);
+    return true;
+}
 
-    NtkSize source_size = ntk_pixmap_get_size(source);
-    NtkPixmap *preview = source;
-    if (source_size.width > 48 || source_size.height > 40) {
-        preview = ntk_pixmap_scale(source, NTK_SIZE(48, 40), NTK_SCALE_FIT);
-        ntk_pixmap_destroy(source);
-        if (!preview) return NULL;
-    }
-    cache_entry->pixmap = preview;
-    return preview;
+static NtkPixmap *image_preview_cached(FileManager *manager,
+                                       const FileEntry *entry) {
+    if (!image_preview_eligible(manager, entry)) return NULL;
+    ImagePreviewCacheEntry *cached =
+        image_preview_cache_find(manager, entry->path);
+    if (cached) return cached->pixmap;
+
+    image_preview_schedule(manager);
+    return NULL;
 }
 
 static void draw_pixmap_fitted(NtkPainter *painter,
@@ -898,8 +914,10 @@ static NtkRect file_view_item_rect(NtkWidget *widget, int index) {
 
     if (mode == VIEW_DETAILS || mode == VIEW_LIST) {
         int top = mode == VIEW_DETAILS ? 22 : 4;
+        int width = ntk_widget_get_geometry(widget).width - 4;
+        if (width < 1) width = 1;
         return NTK_RECT(2, top + index * 22,
-                        ntk_widget_get_geometry(widget).width - 4, 22);
+                        width, 22);
     }
 
     int item_width = mode == VIEW_LARGE_ICONS ? 96 : 180;
@@ -908,6 +926,56 @@ static NtkRect file_view_item_rect(NtkWidget *widget, int index) {
     return NTK_RECT(4 + (index % columns) * item_width,
                     4 + (index / columns) * item_height,
                     item_width - 4, item_height - 4);
+}
+
+static bool file_view_item_is_visible(FileManager *manager, int index) {
+    int offset_x = 0;
+    int offset_y = 0;
+    ntk_scroll_area_get_offsets(manager->file_scroll, &offset_x, &offset_y);
+    NtkRect scroll_geometry = ntk_widget_get_geometry(manager->file_scroll);
+    NtkRect visible = NTK_RECT(offset_x, offset_y,
+                              scroll_geometry.width, scroll_geometry.height);
+    NtkRect item = file_view_item_rect(manager->file_view, index);
+    return item.x + item.width > visible.x &&
+           item.y + item.height > visible.y &&
+           item.x < visible.x + visible.width &&
+           item.y < visible.y + visible.height;
+}
+
+static void image_preview_timer(uint32_t timer_id, void *userdata) {
+    FileManager *manager = userdata;
+    if (!manager || manager->preview_timer_id != timer_id) return;
+
+    // Prefer the selected image, then fill the rest of the visible viewport
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t index = 0; index < manager->entry_count; ++index) {
+            FileEntry *entry = &manager->entries[index];
+            if ((pass == 0) != entry->selected ||
+                !file_view_item_is_visible(manager, (int)index) ||
+                !image_preview_eligible(manager, entry) ||
+                image_preview_cache_find(manager, entry->path)) {
+                continue;
+            }
+
+            if (!image_preview_load(manager, entry)) {
+                ntk_app_kill_timer(timer_id);
+                manager->preview_timer_id = 0;
+                return;
+            }
+            ntk_widget_repaint(manager->file_view);
+            return;
+        }
+    }
+
+    ntk_app_kill_timer(timer_id);
+    manager->preview_timer_id = 0;
+}
+
+static void image_preview_schedule(FileManager *manager) {
+    if (!manager->preview_timer_id) {
+        manager->preview_timer_id =
+            ntk_app_set_timer(35, image_preview_timer, manager);
+    }
 }
 
 static int file_view_hit_test(NtkWidget *widget, NtkPoint point) {
@@ -1011,7 +1079,7 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
                 painter, ntk_style_get_color(style, NTK_STYLE_ROLE_TEXT_PRIMARY));
         }
 
-        NtkPixmap *icon = image_preview(manager, entry);
+        NtkPixmap *icon = image_preview_cached(manager, entry);
         if (manager->view_mode == VIEW_LARGE_ICONS) {
             if (!icon) {
                 icon = file_icon(manager, entry->path, &entry->info, false, 32);
@@ -1020,10 +1088,10 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
                 draw_pixmap_fitted(painter, icon,
                                    NTK_RECT(item.x + 22, item.y + 3, 48, 40));
             }
-            NtkSize text_size = ntk_font_measure_text(font, entry->name);
-            int text_x = item.x + (item.width - text_size.width) / 2;
-            if (text_x < item.x + 2) text_x = item.x + 2;
-            ntk_painter_draw_text(painter, entry->name, text_x, item.y + 48);
+            ntk_painter_draw_text_rect(
+                painter, entry->name,
+                NTK_RECT(item.x + 2, item.y + 46, item.width - 4, 22),
+                NTK_ALIGN_CENTER);
         } else {
             if (!icon) {
                 icon = file_icon(manager, entry->path, &entry->info, false, 16);
@@ -1032,7 +1100,13 @@ static void file_view_paint(NtkWidget *widget, NtkPainter *painter) {
                 draw_pixmap_fitted(painter, icon,
                                    NTK_RECT(item.x + 4, item.y + 3, 16, 16));
             }
-            ntk_painter_draw_text(painter, entry->name, item.x + 24, item.y + 3);
+            int name_width = item.width - 26;
+            if (manager->view_mode == VIEW_DETAILS) name_width = 256;
+            if (name_width < 1) name_width = 1;
+            ntk_painter_draw_text_rect(
+                painter, entry->name,
+                NTK_RECT(item.x + 24, item.y, name_width, item.height),
+                NTK_ALIGN_START);
 
             if (manager->view_mode == VIEW_DETAILS) {
                 char size_text[32];
@@ -1205,6 +1279,13 @@ static NtkWidget *file_view_new(FileManager *manager, NtkWidget *parent) {
     view->manager = manager;
     view->last_click_index = -1;
     return widget;
+}
+
+static void file_manager_relayout(FileManager *manager) {
+    const NtkWidgetClass *window_class = ntk_widget_get_class(manager->window);
+    if (window_class && window_class->layout) {
+        window_class->layout(manager->window);
+    }
 }
 
 static bool copy_file(const char *source,
@@ -2093,6 +2174,7 @@ static void on_tree_expanded(NtkWidget *widget, void *userdata) {
     info.is_directory = 1;
     NtkPixmap *icon = file_icon(manager, item->path, &info, true, 16);
     if (icon) ntk_tree_node_set_icon(node, ntk_pixmap_clone(icon));
+    file_manager_relayout(manager);
 }
 
 static void on_tree_collapsed(NtkWidget *widget, void *userdata) {
@@ -2104,6 +2186,7 @@ static void on_tree_collapsed(NtkWidget *widget, void *userdata) {
     info.is_directory = 1;
     NtkPixmap *icon = file_icon(manager, item->path, &info, false, 16);
     if (icon) ntk_tree_node_set_icon(node, ntk_pixmap_clone(icon));
+    file_manager_relayout(manager);
 }
 
 static void on_tree_selection_changed(NtkWidget *widget, void *userdata) {
@@ -2338,7 +2421,7 @@ static bool file_manager_navigate(FileManager *manager,
     ntk_window_set_title(manager->window, "File Manager");
     if (manager->archive_mode) directory_tree_reset(manager);
     else directory_tree_synchronize(manager);
-    ntk_widget_resize_to_preferred(manager->file_view);
+    file_manager_relayout(manager);
     if (reason != NAVIGATION_REFRESH) {
         ntk_scroll_area_scroll_to(manager->file_scroll, 0, 0);
     }
@@ -2495,7 +2578,7 @@ static void perform_action(FileManager *manager, FileManagerAction action) {
         case ACTION_VIEW_LIST:
         case ACTION_VIEW_DETAILS:
             manager->view_mode = (FileViewMode)(action - ACTION_VIEW_LARGE);
-            ntk_widget_resize_to_preferred(manager->file_view);
+            file_manager_relayout(manager);
             ntk_widget_repaint(manager->file_view);
             file_manager_update_actions(manager);
             break;

@@ -1191,7 +1191,7 @@ static int send_all(int fd, const void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-            if (poll(&pfd, 1, 4) > 0 && (pfd.revents & POLLOUT)) {
+            if (poll(&pfd, 1, 5) > 0 && (pfd.revents & POLLOUT)) {
                 continue; 
             }
             return -1; 
@@ -1207,6 +1207,13 @@ static int recv_all(int fd, void *buf, size_t size) {
     while (read_bytes < size) {
         ssize_t rc = recv(fd, (char *)buf + read_bytes, size - read_bytes, 0);
         if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd pfd = { .fd = fd, .events = POLLIN };
+            int pr = poll(&pfd, 1, 5);
+            if (pr < 0 && errno == EINTR) continue;
+            if (pr <= 0) return -1;
+            continue;
+        }
         if (rc <= 0) return -1;
         read_bytes += (size_t)rc;
     }
@@ -1235,16 +1242,25 @@ static int send_frame(int fd, uint32_t type, uint32_t surface_id, const void *pa
     header.msg_type = type;
     header.payload_size = size;
 
-    if (send_all(fd, &header, sizeof(header)) < 0) {
-        return -1;
+    if (size == 0 || !payload) {
+        return send_all(fd, &header, sizeof(header));
     }
 
-    if (size > 0 && payload) {
-        if (send_all(fd, payload, size) < 0) {
-            return -1;
-        }
+    uint32_t total_size = sizeof(header) + size;
+    if (total_size <= 4096) {
+        uint8_t buf[4096];
+        memcpy(buf, &header, sizeof(header));
+        memcpy(buf + sizeof(header), payload, size);
+        return send_all(fd, buf, total_size);
+    } else {
+        uint8_t *buf = (uint8_t *)malloc(total_size);
+        if (!buf) return -1;
+        memcpy(buf, &header, sizeof(header));
+        memcpy(buf + sizeof(header), payload, size);
+        int ret = send_all(fd, buf, total_size);
+        free(buf);
+        return ret;
     }
-    return 0;
 }
 
 // Broadcast window created/destroyed events to OVERLAY docks
@@ -2801,12 +2817,7 @@ int main(int argc, char *argv[]) {
 
     // VFS CPU core count detection and compositor thread pool initialization
     long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (online_cpus > 1) {
-        compositor_threads = (int)online_cpus;
-        if (compositor_threads > 8) compositor_threads = 8;
-    } else {
-        compositor_threads = 1;
-    }
+    compositor_threads = 1;
 
     printf("Nova Compositor: Online CPUs: %ld via VFS /proc/cpuinfo. Mode: %s (%d thread%s)\n",
            online_cpus, compositor_threads > 1 ? "Multithreaded Parallel Banding" : "Single-Core Inline Fallback",

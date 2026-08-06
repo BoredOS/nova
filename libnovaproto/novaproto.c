@@ -54,7 +54,7 @@ static int send_all(int fd, const void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-            int pr = poll(&pfd, 1, 200);
+            int pr = poll(&pfd, 1, 5);
             if (pr < 0 && errno == EINTR) continue;
             if (pr <= 0) return -1;
             continue;
@@ -72,7 +72,7 @@ static int recv_all(int fd, void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLIN };
-            int pr = poll(&pfd, 1, 200);
+            int pr = poll(&pfd, 1, 5);
             if (pr < 0 && errno == EINTR) continue;
             if (pr <= 0) return -1; 
             continue;
@@ -91,16 +91,25 @@ static int send_frame(int fd, uint32_t type, const void *payload, uint32_t size)
     header.msg_type = type;
     header.payload_size = size;
 
-    if (send_all(fd, &header, sizeof(header)) < 0) {
-        return -1;
+    if (size == 0 || !payload) {
+        return send_all(fd, &header, sizeof(header));
     }
 
-    if (size > 0 && payload) {
-        if (send_all(fd, payload, size) < 0) {
-            return -1;
-        }
+    uint32_t total_size = sizeof(header) + size;
+    if (total_size <= 4096) {
+        uint8_t buf[4096];
+        memcpy(buf, &header, sizeof(header));
+        memcpy(buf + sizeof(header), payload, size);
+        return send_all(fd, buf, total_size);
+    } else {
+        uint8_t *buf = (uint8_t *)malloc(total_size);
+        if (!buf) return -1;
+        memcpy(buf, &header, sizeof(header));
+        memcpy(buf + sizeof(header), payload, size);
+        int ret = send_all(fd, buf, total_size);
+        free(buf);
+        return ret;
     }
-    return 0;
 }
 
 static int recv_dynamic_frame(int fd, NovaFrameHeader *header_out, uint8_t **payload_out, uint32_t *payload_len_out, uint8_t *stack_buf, uint32_t stack_buf_size) {

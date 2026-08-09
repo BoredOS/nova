@@ -20,7 +20,7 @@ LDFLAGS = -static -no-pie -Wl,-Ttext=0x40000000 \
           -L$(SDK_PATH)/lib
 
 LIBS = obj/libnovaproto.a obj/libntk.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf explorer.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf explorer.elf mp3player.elf
 
 all: $(LIBS)
 	$(MAKE) export-sdk

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MP3 Player
+Comment=Simple MP3 player
+Exec=/bin/mp3player.elf
+Icon=/Library/Icons/serenityicons/32x32/app-music.png
+Terminal=false
+Categories=Audio;

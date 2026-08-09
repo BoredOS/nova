@@ -3,6 +3,6 @@ Type=Application
 Name=MP3 Player
 Comment=Simple MP3 player
 Exec=/bin/mp3player.elf
-Icon=/Library/Icons/serenityicons/32x32/app-music.png
+Icon=/Library/Icons/serenityicons/32x32/app-sound-player.png
 Terminal=false
 Categories=Audio;

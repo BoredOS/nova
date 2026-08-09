@@ -276,13 +276,6 @@ static void on_stop_clicked(NtkWidget *w, void *userdata) {
     player_stop();
 }
 
-static void on_exit_clicked(NtkWidget *w, void *userdata) {
-    (void)w;
-    (void)userdata;
-    player_unload();
-    ntk_app_quit(g_player.app);
-}
-
 int main(int argc, char **argv) {
     memset(&g_player, 0, sizeof(g_player));
     g_player.dsp_fd = -1;
@@ -331,10 +324,6 @@ int main(int argc, char **argv) {
     NtkWidget *btn_stop = ntk_button_new("Stop", ctrl);
     ntk_widget_connect(btn_stop, "clicked", on_stop_clicked, NULL);
     ntk_box_pack_start(ctrl, btn_stop, true, true, 4);
-
-    NtkWidget *btn_exit = ntk_button_new("Exit", ctrl);
-    ntk_widget_connect(btn_exit, "clicked", on_exit_clicked, NULL);
-    ntk_box_pack_start(ctrl, btn_exit, true, true, 4);
 
     if (argc >= 2) {
         ntk_text_entry_set_text(g_player.entry_path, argv[1]);

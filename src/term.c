@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/poll.h>
 #include <syscall.h>
 #include <ntk.h>
@@ -985,6 +986,10 @@ int main(void) {
 
     ntk_widget_show(win);
     ntk_app_run(app);
+
+    if (child_pid > 0) {
+        kill(child_pid, 9);
+    }
 
     close(term->master_fd);
     free(term->screen_grid);

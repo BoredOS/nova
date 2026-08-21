@@ -410,12 +410,8 @@ void ntk_app_run_modal(NtkWidget *modal_win, bool *done_flag) {
             NtkEvent ev;
             while (ntk_nova_pending_events() || (poll(pfds, 1, 0) > 0 && (pfds[0].revents & POLLIN))) {
                 if (ntk_nova_poll_event(g_app->fd, &ev) < 0) {
-                    struct pollfd check_pfd = { .fd = g_app->fd, .events = POLLIN };
-                    if (poll(&check_pfd, 1, 0) > 0 && (check_pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
-                        g_app->running = false;
-                        break;
-                    }
-                    continue;
+                    g_app->running = false;
+                    break;
                 }
 
                 uint32_t target_surf_id = (uint32_t)(uintptr_t)ev.target;

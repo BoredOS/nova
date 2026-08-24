@@ -43,6 +43,7 @@ static NtkWidget *g_chk_warning_accept = NULL;
 static NtkWidget *g_progress_bar = NULL;
 static NtkWidget *g_lbl_progress_status = NULL;
 static NtkWidget *g_lbl_confirm_disk = NULL;
+static NtkWidget *g_lbl_confirm_fs = NULL;
 static NtkWidget *g_lbl_confirm_pkgs = NULL;
 #define PAGE_WELCOME  "welcome"
 #define PAGE_DISK     "disk"
@@ -72,6 +73,14 @@ typedef enum {
 
 static InstallType g_install_type = INSTALL_TYPE_TYPICAL;
 static NtkRadioGroup *g_type_radio_group = NULL;
+
+typedef enum {
+    FS_TYPE_EXT4 = 0,
+    FS_TYPE_FAT32
+} FsType;
+
+static FsType g_fs_type = FS_TYPE_EXT4;
+static NtkRadioGroup *g_fs_radio_group = NULL;
 
 typedef enum {
     INSTALL_STATE_INIT = 0,
@@ -180,14 +189,14 @@ static void load_excludes(void) {
     int fd = sys_open("/usr/share/packages/excludes.txt", "r");
     if (fd < 0) return;
     
-    char *buf = (char*)malloc(32768);
+    char *buf = (char*)malloc(65536);
     if (!buf) { sys_close(fd); return; }
     
-    int n = sys_read(fd, buf, 32768 - 1);
+    int n = sys_read(fd, buf, 65536 - 1);
     if (n > 0) {
         buf[n] = '\0';
         char *line = buf;
-        while (line && *line && g_num_excludes < 512) {
+        while (line && *line && g_num_excludes < 2048) {
             char *next = strchr(line, '\n');
             if (next) *next = '\0';
             
@@ -212,7 +221,8 @@ static int should_exclude(const char *path) {
         sc_strcmp(path, "/bin/boredos_install.elf") == 0 ||
         sc_strcmp(path, "/bin/installer") == 0 ||
         sc_strcmp(path, "/bin/installer.elf") == 0 ||
-        sc_strcmp(path, "/usr/share/applications/installer.desktop") == 0) {
+        sc_strcmp(path, "/usr/share/applications/installer.desktop") == 0 ||
+        strncmp(path, "/usr/share/packages", 19) == 0) {
         return 1;
     }
     for (int i = 0; i < g_num_excludes; i++) {
@@ -238,10 +248,15 @@ static int copy_file(const char *src, const char *dst) {
     if (!buf) { sys_close(sfd); sys_close(dfd); return -1; }
     int n;
     while ((n = sys_read(sfd, buf, 65536)) > 0) {
-        if (sys_write_fs(dfd, buf, n) != n) {
-            sys_close(sfd); sys_close(dfd);
-            free(buf);
-            return -1;
+        int written = 0;
+        while (written < n) {
+            int w = sys_write_fs(dfd, buf + written, n - written);
+            if (w <= 0) {
+                sys_close(sfd); sys_close(dfd);
+                free(buf);
+                return -1;
+            }
+            written += w;
         }
     }
     free(buf);
@@ -434,16 +449,16 @@ static void run_installation_sync(void) {
     
     g_esp_dev[0] = '\0';
     g_root_dev[0] = '\0';
+    const char *raw_devname = devname;
+    if (strncmp(raw_devname, "/dev/", 5) == 0) raw_devname += 5;
+    size_t dev_len = strlen(raw_devname);
+
     int n = sys_disk_get_count();
     for (int i = 0; i < n; i++) {
         disk_info_t d;
         if (sys_disk_get_info(i, &d) != 0) continue;
         if (!d.is_partition) continue;
-        int match = 1;
-        for (int j = 0; devname[j]; j++) {
-            if (d.devname[j] != devname[j]) { match = 0; break; }
-        }
-        if (!match) continue;
+        if (strncmp(d.devname, raw_devname, dev_len) != 0) continue;
         if (g_is_uefi && d.is_esp && !g_esp_dev[0])
             sc_strncpy(g_esp_dev, d.devname, 16);
         else if (!d.is_esp && !g_root_dev[0]) {
@@ -458,15 +473,37 @@ static void run_installation_sync(void) {
 
     set_progress(0.15f, "Formatting partitions...");
     if (g_is_uefi) {
-        if (sys_disk_mkfs_fat32(g_esp_dev, "EFI") != 0) {
-            ntk_dialog_error(g_win, "Installation Error", "Failed to format the ESP partition.");
+        char fat_args[64];
+        snprintf(fat_args, sizeof(fat_args), "-F 32 -n EFI /dev/%s", g_esp_dev);
+        int mpid = sys_spawn("/bin/mkfs_fat.elf", fat_args, 0, 0);
+        if (mpid >= 0) {
+            int status = 0;
+            waitpid(mpid, &status, 0);
+            if (status != 0) {
+                ntk_dialog_error(g_win, "Installation Error", "Failed to format the ESP partition.");
+                goto error;
+            }
+        }
+    }
+
+    char root_fs_args[64];
+    const char *mkfs_prog = (g_fs_type == FS_TYPE_EXT4) ? "/bin/mkfs_ext4.elf" : "/bin/mkfs_fat.elf";
+    if (g_fs_type == FS_TYPE_EXT4) {
+        snprintf(root_fs_args, sizeof(root_fs_args), "-L BOREDOS /dev/%s", g_root_dev);
+    } else {
+        snprintf(root_fs_args, sizeof(root_fs_args), "-F 32 -n BOREDOS /dev/%s", g_root_dev);
+    }
+    int rpid = sys_spawn(mkfs_prog, root_fs_args, 0, 0);
+    if (rpid >= 0) {
+        int status = 0;
+        waitpid(rpid, &status, 0);
+        if (status != 0) {
+            ntk_dialog_error(g_win, "Installation Error", "Failed to format the root partition.");
             goto error;
         }
     }
-    if (sys_disk_mkfs_fat32(g_root_dev, "BOREDOS") != 0) {
-        ntk_dialog_error(g_win, "Installation Error", "Failed to format the root partition.");
-        goto error;
-    }
+
+    sys_disk_rescan(devname);
 
     set_progress(0.20f, "Mounting target partitions...");
     sys_mkdir("/mnt");
@@ -504,6 +541,12 @@ static void run_installation_sync(void) {
     copy_tree("/root", "/mnt/root");
     copy_tree("/usr", "/mnt/usr");
     copy_tree("/etc", "/mnt/etc");
+    sys_mkdir("/mnt/tmp");
+    sys_mkdir("/mnt/var");
+    sys_mkdir("/mnt/var/run");
+    sys_mkdir("/mnt/dev");
+    sys_mkdir("/mnt/proc");
+    sys_mkdir("/mnt/sys");
     
     if (copy_file("/boot/boredos.elf", "/mnt/boot/boredos.elf") != 0) {
         ntk_dialog_error(g_win, "Installation Error", "Failed to copy kernel.");
@@ -540,37 +583,67 @@ static void run_installation_sync(void) {
         sys_mkdir("/mnt/boot/EFI/BOOT");
         copy_file("/boot/BOOTX64.EFI", "/mnt/boot/EFI/BOOT/BOOTX64.EFI");
         copy_file_optional("/boot/BOOTIA32.EFI", "/mnt/boot/EFI/BOOT/BOOTIA32.EFI");
+        copy_file_optional("/boot/splash.jpg", "/mnt/boot/splash.jpg");
         
         int fd = sys_open("/mnt/boot/limine.conf", "w");
         if (fd >= 0) {
-            char cfg[512];
+            char cfg[1024];
             int len = snprintf(cfg, sizeof(cfg),
                 "timeout: 3\n"
                 "verbose: yes\n"
                 "\n"
+                "${WALLPAPER_PATH}=boot():/splash.jpg\n"
+                "\n"
+                "wallpaper: ${WALLPAPER_PATH}\n"
+                "wallpaper_style: stretched\n"
+                "backdrop: 000000\n"
+                "term_margin: 200\n"
+                "interface_branding: BoredOS\n"
+                "\n"
                 "/BoredOS\n"
                 "    protocol: limine\n"
                 "    path: boot():/boredos.elf\n"
-                "    cmdline: -v root=/dev/%s --disk\n",
-                g_root_dev);
+                "    cmdline: -v root=/dev/%s\n"
+                "\n"
+                "/  └──> BoredOS (Silent)\n"
+                "    protocol: limine\n"
+                "    path: boot():/boredos.elf\n"
+                "    cmdline: root=/dev/%s\n",
+                g_root_dev, g_root_dev);
             if (len > 0) sys_write_fs(fd, cfg, len);
             sys_close(fd);
         }
     } else {
         copy_file_optional("/boot/limine-bios.sys", "/mnt/limine-bios.sys");
+        copy_file_optional("/boot/splash.jpg", "/mnt/splash.jpg");
+        copy_file_optional("/boot/splash.jpg", "/mnt/boot/splash.jpg");
         int fd = sys_open("/mnt/limine.conf", "w");
         if (fd >= 0) {
-            char cfg[512];
+            char cfg[1024];
             int len = snprintf(cfg, sizeof(cfg),
                 "timeout: 3\n"
                 "verbose: yes\n"
+                "\n"
+                "${WALLPAPER_PATH}=boot():/splash.jpg\n"
+                "\n"
+                "wallpaper: ${WALLPAPER_PATH}\n"
+                "wallpaper_style: stretched\n"
+                "backdrop: 000000\n"
+                "term_margin: 200\n"
+                "interface_branding: BoredOS\n"
                 "\n"
                 "/BoredOS\n"
                 "    protocol: limine\n"
                 "    root: boot()\n"
                 "    path: /boredos.elf\n"
-                "    cmdline: -v root=/dev/%s --disk\n",
-                g_root_dev);
+                "    cmdline: -v root=/dev/%s\n"
+                "\n"
+                "/  └──> BoredOS (Silent)\n"
+                "    protocol: limine\n"
+                "    root: boot()\n"
+                "    path: /boredos.elf\n"
+                "    cmdline: root=/dev/%s\n",
+                g_root_dev, g_root_dev);
             if (len > 0) sys_write_fs(fd, cfg, len);
             sys_close(fd);
         }
@@ -631,6 +704,9 @@ static void on_btn_next_clicked(NtkWidget *w, void *userdata) {
         }
     } else if (g_current_page_idx == 2) {
         int selected_idx = ntk_radio_group_get_selected(g_type_radio_group);
+        int selected_fs = ntk_radio_group_get_selected(g_fs_radio_group);
+        g_fs_type = (selected_fs == 1) ? FS_TYPE_FAT32 : FS_TYPE_EXT4;
+
         if (selected_idx == 0) {
             g_install_type = INSTALL_TYPE_TYPICAL;
             for (int i = 0; i < g_num_options; i++) {
@@ -658,6 +734,11 @@ static void on_btn_next_clicked(NtkWidget *w, void *userdata) {
                  g_disks[g_selected_disk_idx].devname, g_disks[g_selected_disk_idx].mb);
         ntk_label_set_text(g_lbl_confirm_disk, disk_buf);
         
+        char fs_buf[64];
+        snprintf(fs_buf, sizeof(fs_buf), "Root Filesystem: %s", 
+                 (g_fs_type == FS_TYPE_EXT4) ? "EXT4  (Recommended!)" : "FAT32");
+        ntk_label_set_text(g_lbl_confirm_fs, fs_buf);
+
         char pkgs_buf[256] = "";
         int first = 1;
         for (int i = 0; i < g_num_options; i++) {
@@ -803,10 +884,26 @@ int main(void) {
     ntk_radio_group_add(g_type_radio_group, rb_custom);
 
     NtkWidget *lbl_custom_info = ntk_label_new("Allows you to manually select which optional packages you want to install. Recommended for advanced users.", vbox_radio);
-    ntk_widget_set_margin(lbl_custom_info, NTK_INSETS(0, 24, 0, 0));
+    ntk_widget_set_margin(lbl_custom_info, NTK_INSETS(0, 24, 10, 0));
     ntk_box_pack_start(vbox_radio, lbl_custom_info, false, false, 2);
 
     ntk_radio_group_set_selected(g_type_radio_group, 0);
+
+    NtkWidget *lbl_fs_title = ntk_label_new("Choose Root Filesystem:", vbox_radio);
+    ntk_widget_set_margin(lbl_fs_title, NTK_INSETS(4, 0, 2, 0));
+    ntk_box_pack_start(vbox_radio, lbl_fs_title, false, false, 2);
+
+    g_fs_radio_group = ntk_radio_group_new();
+
+    NtkWidget *rb_ext4 = ntk_radio_button_new("EXT4  (Recommended!)", vbox_radio);
+    ntk_box_pack_start(vbox_radio, rb_ext4, false, false, 2);
+    ntk_radio_group_add(g_fs_radio_group, rb_ext4);
+
+    NtkWidget *rb_fat32 = ntk_radio_button_new("FAT32", vbox_radio);
+    ntk_box_pack_start(vbox_radio, rb_fat32, false, false, 2);
+    ntk_radio_group_add(g_fs_radio_group, rb_fat32);
+
+    ntk_radio_group_set_selected(g_fs_radio_group, 0);
     
     NtkWidget *p_packages = ntk_box_new(NTK_VERTICAL, g_stack);
     ntk_box_set_spacing(p_packages, 8);
@@ -877,6 +974,9 @@ int main(void) {
     
     g_lbl_confirm_disk = ntk_label_new("Target Disk: /dev/...", p_confirm);
     ntk_box_pack_start(p_confirm, g_lbl_confirm_disk, false, false, 2);
+
+    g_lbl_confirm_fs = ntk_label_new("Root Filesystem: EXT4  (Recommended!)", p_confirm);
+    ntk_box_pack_start(p_confirm, g_lbl_confirm_fs, false, false, 2);
     
     g_lbl_confirm_pkgs = ntk_label_new("Optional Packages: ...", p_confirm);
     ntk_box_pack_start(p_confirm, g_lbl_confirm_pkgs, false, false, 2);

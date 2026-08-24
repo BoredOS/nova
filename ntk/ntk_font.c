@@ -159,7 +159,8 @@ NtkFont* ntk_font_new(const char *family, int size, NtkFontWeight weight, NtkFon
         return NULL;
     }
 
-    if (!stbtt_InitFont(&f->info, f->ttf_data, stbtt_GetFontOffsetForIndex(f->ttf_data, 0))) {
+    int font_offset = stbtt_GetFontOffsetForIndex(f->ttf_data, 0);
+    if (font_offset < 0 || !stbtt_InitFont(&f->info, f->ttf_data, font_offset)) {
         printf("[NTK FONT] ntk_font_new: stbtt_InitFont failed for %s\n", path);
         free(f->ttf_data);
         free(f);

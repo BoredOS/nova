@@ -605,6 +605,14 @@ static void on_canvas_resize(NtkWidget *widget, int width, int height, term_t *t
 
     if (term->cursor_x >= term->cols) term->cursor_x = term->cols - 1;
     if (term->cursor_y >= term->rows) term->cursor_y = term->rows - 1;
+
+    struct winsize ws = {
+        .ws_col = (unsigned short)new_cols,
+        .ws_row = (unsigned short)new_rows,
+        .ws_xpixel = (unsigned short)width,
+        .ws_ypixel = (unsigned short)height
+    };
+    ioctl(term->master_fd, TIOCSWINSZ, &ws);
 }
 
 static void draw_cell_fast(struct NtkPainter *p, int gx, int gy, term_cell_t cell, uint32_t term_bg) {

@@ -1191,10 +1191,10 @@ static int send_all(int fd, const void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-            if (poll(&pfd, 1, 5) > 0 && (pfd.revents & POLLOUT)) {
-                continue; 
-            }
-            return -1; 
+            int pr = poll(&pfd, 1, 1000);
+            if (pr < 0 && errno == EINTR) continue;
+            if (pr <= 0) return -1; 
+            continue; 
         }
         if (rc <= 0) return -1;
         written += (size_t)rc;
@@ -1209,7 +1209,7 @@ static int recv_all(int fd, void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLIN };
-            int pr = poll(&pfd, 1, 5);
+            int pr = poll(&pfd, 1, 1000);
             if (pr < 0 && errno == EINTR) continue;
             if (pr <= 0) return -1;
             continue;
@@ -2239,6 +2239,7 @@ void compositor_composite(void) {
         g_render_h = dirty_h;
     }
 
+    pthread_mutex_lock(&g_swap_mutex);
     build_surface_snapshot();
 
     if (compositor_threads > 1 && worker_threads_active) {
@@ -2256,6 +2257,7 @@ void compositor_composite(void) {
         // Single-core fallback: 100% inline execution on main thread
         compositor_render_band_pixels(0, screen_h);
     }
+    pthread_mutex_unlock(&g_swap_mutex);
 
     // Draw cursor onto back_buffer
     draw_cursor(back_buffer, screen_w, screen_h, mx, my);
@@ -3259,7 +3261,12 @@ int main(int argc, char *argv[]) {
                 else if (i >= client_poll_start) {
                     int client_fd = poll_fds[i].fd;
                     surface_t *surf = client_surfaces[i];
-                    handle_client_message(client_fd, &surf);
+                    struct pollfd check_pfd = { .fd = client_fd, .events = POLLIN, .revents = 0 };
+                    int max_drain = 32;
+                    while (max_drain-- > 0 && poll(&check_pfd, 1, 0) > 0 && (check_pfd.revents & POLLIN)) {
+                        handle_client_message(client_fd, &surf);
+                        check_pfd.revents = 0;
+                    }
                 }
             } else if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
                 int client_fd = poll_fds[i].fd;

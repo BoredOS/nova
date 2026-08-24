@@ -54,9 +54,9 @@ static int send_all(int fd, const void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-            int pr = poll(&pfd, 1, 5);
+            int pr = poll(&pfd, 1, 1000);
             if (pr < 0 && errno == EINTR) continue;
-            if (pr <= 0) return -1;
+            if (pr < 0) return -1;
             continue;
         }
         if (rc <= 0) return -1;
@@ -72,9 +72,9 @@ static int recv_all(int fd, void *buf, size_t size) {
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = { .fd = fd, .events = POLLIN };
-            int pr = poll(&pfd, 1, 5);
+            int pr = poll(&pfd, 1, 1000);
             if (pr < 0 && errno == EINTR) continue;
-            if (pr <= 0) return -1; 
+            if (pr < 0) return -1;
             continue;
         }
         if (rc <= 0) return -1;

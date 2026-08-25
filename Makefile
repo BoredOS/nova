@@ -11,13 +11,12 @@ SDK_PATH = $(BOREDOS_SDK)
 
 DESTDIR ?= $(abspath build/dist)
 
-CFLAGS  = -Wall -Wextra -std=gnu11 -ffreestanding -O2 -g -fno-stack-protector \
-          -fno-stack-check -fno-lto -fno-pie -m64 -march=x86-64 -mno-red-zone \
+CFLAGS  = -Wall -Wextra -std=gnu11 -O2 -g -fno-stack-protector \
+          -fno-stack-check -m64 -march=x86-64 \
           -Ilibnovaproto -Intk -I. -Isrc -I$(SDK_PATH)/include
 
-LDFLAGS = -static -no-pie -Wl,-Ttext=0x40000000 \
-          -Wl,--no-dynamic-linker -Wl,-z,text -Wl,-z,max-page-size=0x1000 \
-          -L$(SDK_PATH)/lib
+LDFLAGS = -Wl,-z,max-page-size=0x1000 -Wl,-dynamic-linker,/usr/lib/ld.so -Wl,-rpath,/usr/lib:/lib \
+          -L$(SDK_PATH)/lib -lm
 
 LIBS = obj/libnovaproto.a obj/libntk.a
 APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf explorer.elf

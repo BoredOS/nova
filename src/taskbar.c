@@ -436,119 +436,34 @@ static void free_image(image_t *img) {
     img->h = 0;
 }
 
-static bool load_file_to_buffer(const char *path, unsigned char **out_buf, size_t *out_size) {
-    if (!path || !out_buf || !out_size) return false;
-
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size <= 0) {
-        fclose(f);
-        return false;
-    }
-
-    unsigned char *buf = malloc((size_t)size);
-    if (!buf) {
-        fclose(f);
-        return false;
-    }
-
-    size_t total_rd = 0;
-    while (total_rd < (size_t)size) {
-        size_t rd = fread(buf + total_rd, 1, (size_t)size - total_rd, f);
-        if (rd == 0) break;
-        total_rd += rd;
-    }
-    fclose(f);
-
-    if (total_rd == 0) {
-        free(buf);
-        return false;
-    }
-
-    *out_buf = buf;
-    *out_size = total_rd;
-    return true;
-}
-
-static bool load_image_rgba(const char *path, image_t *out) {
+static bool load_scaled_image(const char *path, int target_w, int target_h, image_t *out) {
     if (!out) return false;
     out->pixels = NULL;
     out->w = 0;
     out->h = 0;
+    if (!path || !*path) return false;
 
-    unsigned char *file_buf = NULL;
-    size_t file_size = 0;
-    if (!load_file_to_buffer(path, &file_buf, &file_size)) return false;
+    NtkPixmap *pm = ntk_pixmap_new_thumbnail_from_file(path, target_w, target_h);
+    if (!pm) return false;
 
-    int w = 0, h = 0, comp = 0;
-    unsigned char *rgba = stbi_load_from_memory(file_buf, (int)file_size, &w, &h, &comp, 4);
-    free(file_buf);
-    if (!rgba || w <= 0 || h <= 0) {
-        if (rgba) stbi_image_free(rgba);
+    int w = ntk_pixmap_get_width(pm);
+    int h = ntk_pixmap_get_height(pm);
+    unsigned char *data = ntk_pixmap_get_data(pm);
+    if (w <= 0 || h <= 0 || !data) {
+        ntk_pixmap_destroy(pm);
         return false;
     }
 
-    uint32_t *argb = malloc((size_t)w * (size_t)h * sizeof(uint32_t));
-    if (!argb) {
-        stbi_image_free(rgba);
+    size_t sz = (size_t)w * (size_t)h * sizeof(uint32_t);
+    out->pixels = malloc(sz);
+    if (!out->pixels) {
+        ntk_pixmap_destroy(pm);
         return false;
     }
-
-    for (int i = 0; i < w * h; i++) {
-        uint8_t r = rgba[i * 4 + 0];
-        uint8_t g = rgba[i * 4 + 1];
-        uint8_t b = rgba[i * 4 + 2];
-        uint8_t a = rgba[i * 4 + 3];
-        argb[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-    }
-
-    stbi_image_free(rgba);
-
-    out->pixels = argb;
+    memcpy(out->pixels, data, sz);
     out->w = w;
     out->h = h;
-    return true;
-}
-
-static image_t scale_image_nearest(const image_t *src, int target_w, int target_h) {
-    image_t out = {0};
-    if (!src || !src->pixels || target_w <= 0 || target_h <= 0) return out;
-
-    out.pixels = malloc((size_t)target_w * (size_t)target_h * sizeof(uint32_t));
-    if (!out.pixels) return out;
-
-    out.w = target_w;
-    out.h = target_h;
-
-    for (int y = 0; y < target_h; y++) {
-        int src_y = (y * src->h) / target_h;
-        for (int x = 0; x < target_w; x++) {
-            int src_x = (x * src->w) / target_w;
-            out.pixels[y * target_w + x] = src->pixels[src_y * src->w + src_x];
-        }
-    }
-
-    return out;
-}
-
-static bool load_scaled_image(const char *path, int target_w, int target_h, image_t *out) {
-    image_t raw = {0};
-    if (!load_image_rgba(path, &raw)) return false;
-
-    if (raw.w == target_w && raw.h == target_h) {
-        *out = raw;
-        return true;
-    }
-
-    image_t scaled = scale_image_nearest(&raw, target_w, target_h);
-    free_image(&raw);
-
-    if (!scaled.pixels) return false;
-    *out = scaled;
+    ntk_pixmap_destroy(pm);
     return true;
 }
 
@@ -1127,9 +1042,13 @@ static bool load_desktop_file(const char *path, const char *desktop_file) {
 }
 
 static void scan_desktop_dir(const char *dir_path) {
-    FAT32_FileInfo files[64];
+    FAT32_FileInfo *files = (FAT32_FileInfo *)malloc(sizeof(FAT32_FileInfo) * 64);
+    if (!files) return;
     int file_count = sys_list(dir_path, files, 64);
-    if (file_count <= 0) return;
+    if (file_count <= 0) {
+        free(files);
+        return;
+    }
 
     for (int j = 0; j < file_count; j++) {
         if (files[j].is_directory) continue;
@@ -1140,6 +1059,7 @@ static void scan_desktop_dir(const char *dir_path) {
 
         load_desktop_file(desktop_full_path, files[j].name);
     }
+    free(files);
 }
 
 static void load_applications(void) {
@@ -1149,7 +1069,8 @@ static void load_applications(void) {
     scan_desktop_dir("/Library/Applications");
     scan_desktop_dir("/Library/AppData");
 
-    FAT32_FileInfo apps_dirs[128];
+    FAT32_FileInfo *apps_dirs = (FAT32_FileInfo *)malloc(sizeof(FAT32_FileInfo) * 128);
+    if (!apps_dirs) return;
     int dir_count = sys_list("/Library/AppData", apps_dirs, 128);
     if (dir_count > 0) {
         for (int i = 0; i < dir_count; i++) {
@@ -1161,6 +1082,7 @@ static void load_applications(void) {
             scan_desktop_dir(app_dir_path);
         }
     }
+    free(apps_dirs);
 }
 
 static bool matches_filter(const char *name, const char *filter) {

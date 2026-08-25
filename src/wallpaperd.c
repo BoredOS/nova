@@ -63,17 +63,56 @@ static void load_wallpaper_path(const char *path, char *out_path, size_t max_len
     fclose(f);
 }
 
+#include "stb_image.h"
+
+static void scale_nearest_argb(uint32_t *dst, int dst_w, int dst_h, const uint8_t *src_rgba, int src_w, int src_h) {
+    for (int y = 0; y < dst_h; y++) {
+        int src_y = (int)((uint64_t)y * (uint64_t)src_h / (uint64_t)dst_h);
+        if (src_y >= src_h) src_y = src_h - 1;
+        const uint8_t *src_row = src_rgba + ((size_t)src_y * (size_t)src_w * 4);
+        uint32_t *dst_row = dst + ((size_t)y * (size_t)dst_w);
+        for (int x = 0; x < dst_w; x++) {
+            int src_x = (int)((uint64_t)x * (uint64_t)src_w / (uint64_t)dst_w);
+            if (src_x >= src_w) src_x = src_w - 1;
+            const uint8_t *px = src_row + (src_x * 4);
+            dst_row[x] = ((uint32_t)px[3] << 24) | ((uint32_t)px[0] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[2];
+        }
+    }
+}
+
 static bool load_and_scale_wallpaper(const char *path, uint32_t *dest_pixels, int screen_w, int screen_h) {
-    NtkPixmap *pm = ntk_pixmap_new_from_file(path);
-    if (!pm) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
 
-    NtkPixmap *scaled = ntk_pixmap_scale(pm, NTK_SIZE(screen_w, screen_h), NTK_SCALE_STRETCH);
-    ntk_pixmap_destroy(pm);
-    if (!scaled) return false;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    if (size <= 0 || size > 32 * 1024 * 1024) {
+        fclose(f);
+        return false;
+    }
+    fseek(f, 0, SEEK_SET);
 
-    unsigned char *data = ntk_pixmap_get_data(scaled);
-    memcpy(dest_pixels, data, screen_w * screen_h * 4);
-    ntk_pixmap_destroy(scaled);
+    unsigned char *file_buf = malloc((size_t)size);
+    if (!file_buf) {
+        fclose(f);
+        return false;
+    }
+
+    size_t rd = fread(file_buf, 1, (size_t)size, f);
+    fclose(f);
+    if (rd != (size_t)size) {
+        free(file_buf);
+        return false;
+    }
+
+    int img_w = 0, img_h = 0, channels = 0;
+    unsigned char *data = stbi_load_from_memory(file_buf, (int)size, &img_w, &img_h, &channels, 4);
+    free(file_buf);
+
+    if (!data) return false;
+
+    scale_nearest_argb(dest_pixels, screen_w, screen_h, data, img_w, img_h);
+    stbi_image_free(data);
     return true;
 }
 
@@ -82,7 +121,7 @@ int main(int argc, char *argv[]) {
     (void)argv;
 
     NtkStyle *style = ntk_style_new_from_file("/Library/AppData/org.boredos.nova/nova.conf");
-    NtkColor desktop_bg = 0xFF3C3C3C;
+    NtkColor desktop_bg = 0xFF008080;
     if (style) {
         desktop_bg = ntk_style_get_color(style, NTK_STYLE_ROLE_WINDOW_BG);
         ntk_style_destroy(style);

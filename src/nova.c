@@ -1042,12 +1042,23 @@ static void scale_nearest_rgba(uint32_t *dst, uint32_t dst_w, uint32_t dst_h, co
 }
 
 static void render_resize_preview(surface_t *surf, uint32_t src_w, uint32_t src_h, uint32_t new_w, uint32_t new_h) {
-    if (!surf || !resize_preview_pixels) return;
+    if (!surf) return;
 
     uint64_t needed = (uint64_t)new_w * (uint64_t)new_h;
-    if (needed == 0 || needed > resize_preview_capacity) {
+    if (needed == 0) {
         surf->resize_preview_active = false;
         return;
+    }
+
+    if (needed > resize_preview_capacity || !resize_preview_pixels) {
+        if (resize_preview_pixels) free(resize_preview_pixels);
+        resize_preview_pixels = malloc((size_t)needed * sizeof(uint32_t));
+        if (!resize_preview_pixels) {
+            resize_preview_capacity = 0;
+            surf->resize_preview_active = false;
+            return;
+        }
+        resize_preview_capacity = (uint32_t)needed;
     }
 
     if (surf->pixels) {
@@ -1065,6 +1076,12 @@ static void clear_resize_state(surface_t *surf) {
     surf->resize_edge = 0;
     surf->resize_request_queued = false;
     surf->resize_force_next_request = false;
+    surf->resize_preview_active = false;
+    if (resize_preview_pixels) {
+        free(resize_preview_pixels);
+        resize_preview_pixels = NULL;
+        resize_preview_capacity = 0;
+    }
 }
 
 static void compute_resize_geometry(surface_t *surf, int edge, int mouse_x, int mouse_y, int *out_x, int *out_y, uint32_t *out_w, uint32_t *out_h) {
@@ -2046,7 +2063,6 @@ static void compositor_render_band_pixels(int band_y_start, int band_y_end) {
     int render_h = g_render_h;
     bool partial_render = g_partial_render;
 
-    // Fill background solid Catppuccin color for rows in [band_y_start, band_y_end)
     if (partial_render) {
         int y1 = render_y < band_y_start ? band_y_start : render_y;
         int y2 = (render_y + render_h) > band_y_end ? band_y_end : (render_y + render_h);
@@ -2056,7 +2072,7 @@ static void compositor_render_band_pixels(int band_y_start, int band_y_end) {
             int sx = render_x < 0 ? 0 : render_x;
             int ex = (render_x + render_w) > screen_w ? screen_w : (render_x + render_w);
             for (int x = sx; x < ex; x++) {
-                row[x] = 0xFF1E1E2E;
+                row[x] = (((x >> 2) ^ (y >> 2)) & 1) ? 0xFF000000 : 0xFFFFFFFF;
             }
         }
     } else {
@@ -2065,7 +2081,7 @@ static void compositor_render_band_pixels(int band_y_start, int band_y_end) {
         for (int y = y1; y < y2; y++) {
             uint32_t *row = &back_buffer[y * screen_w];
             for (int x = 0; x < screen_w; x++) {
-                row[x] = 0xFF1E1E2E;
+                row[x] = (((x >> 2) ^ (y >> 2)) & 1) ? 0xFF000000 : 0xFFFFFFFF;
             }
         }
     }
@@ -2747,11 +2763,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    resize_preview_capacity = (uint32_t)((uint64_t)screen_w * (uint64_t)screen_h);
-    resize_preview_pixels = malloc((size_t)resize_preview_capacity * sizeof(uint32_t));
-    if (!resize_preview_pixels) {
-        fprintf(stderr, "Nova Compositor Warning: Resize preview buffer allocation failed\n");
-    }
+    resize_preview_capacity = 0;
+    resize_preview_pixels = NULL;
 
     // Set graphics mode on active console
     if (ioctl(0, KDSETMODE, (void*)KD_GRAPHICS) < 0) {
@@ -3447,6 +3460,35 @@ int main(int argc, char *argv[]) {
         if (autostarts[i].pid > 0) {
             kill(autostarts[i].pid, SIGTERM);
         }
+    }
+
+    // Clean up and unlink all remaining surfaces and SHM segments
+    surface_t *curr_surf = surface_head;
+    while (curr_surf) {
+        surface_t *next_surf = curr_surf->next;
+        if (curr_surf->pixels) {
+            munmap(curr_surf->pixels, curr_surf->shm_size);
+        }
+        if (curr_surf->shm_path[0]) {
+            unlink(curr_surf->shm_path);
+        }
+        if (curr_surf->pending_pixels) {
+            munmap(curr_surf->pending_pixels, curr_surf->pending_w * curr_surf->pending_h * 4);
+        }
+        if (curr_surf->pending_shm_path[0]) {
+            unlink(curr_surf->pending_shm_path);
+        }
+        if (curr_surf->icon_pixels) {
+            free(curr_surf->icon_pixels);
+        }
+        free(curr_surf);
+        curr_surf = next_surf;
+    }
+    surface_head = NULL;
+
+    if (back_buffer) {
+        free(back_buffer);
+        back_buffer = NULL;
     }
 
     if (kbd_fd >= 0) close(kbd_fd);

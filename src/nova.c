@@ -879,6 +879,7 @@ void surface_add(surface_t *surf) {
 }
 
 static void present_framebuffer(int x, int y, int w, int h) {
+    __builtin_ia32_sfence();
     if (fb_fd >= 0 && back_buffer) {
         if (w <= 0 || h <= 0) return;
         struct { int x; int y; int w; int h; } rect = { x, y, w, h };
@@ -1707,6 +1708,7 @@ void copy_box_to_fb(int bx, int by, int bw, int bh) {
         uint32_t *bb_row = &back_buffer[y * screen_w + start_x];
         memcpy(fb_row, bb_row, (size_t)copy_w * sizeof(uint32_t));
     }
+    __builtin_ia32_sfence();
 }
 
 static bool rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
@@ -2287,6 +2289,7 @@ void compositor_composite(void) {
         for (int y = 0; y < screen_h; y++) {
             memcpy((uint8_t*)fb_mem + (uint64_t)y * finfo.line_length, &back_buffer[y * screen_w], screen_w * 4);
         }
+        __builtin_ia32_sfence();
         present_framebuffer(0, 0, screen_w, screen_h);
     }
 
@@ -2296,8 +2299,58 @@ void compositor_composite(void) {
     cursor_visible = true;
 }
 
+static void disconnect_client(int client_fd) {
+    // Release active client list slot
+    for (int k = 0; k < MAX_CLIENTS; k++) {
+        if (clients[k].active && clients[k].fd == client_fd) {
+            clients[k].active = false;
+            close(client_fd);
+            client_count--;
+            break;
+        }
+    }
+
+    // Delete surface belonging to closed client descriptor
+    surface_t *curr = surface_head;
+    while (curr) {
+        surface_t *next = curr->next;
+        if (curr->client_fd == client_fd) {
+            broadcast_window_event(EVT_WINDOW_DESTROYED, curr);
+            if (curr->pixels) {
+                munmap(curr->pixels, curr->shm_size);
+            }
+            unlink(curr->shm_path);
+
+            if (curr->pending_pixels) {
+                munmap(curr->pending_pixels, curr->pending_w * curr->pending_h * 4);
+                unlink(curr->pending_shm_path);
+            }
+            curr->resize_preview_active = false;
+            clear_resize_state(curr);
+
+            if (curr->focused) {
+                curr->focused = false;
+                surface_t *fallback = surface_get_focused();
+                if (fallback && fallback != curr) {
+                    set_focus(fallback);
+                }
+            }
+
+            if (curr->icon_pixels) {
+                free(curr->icon_pixels);
+                curr->icon_pixels = NULL;
+            }
+
+            surface_remove(curr);
+            free(curr);
+            needs_composite = true;
+        }
+        curr = next;
+    }
+}
+
 // Client IPC message handlers
-void handle_client_message(int fd, surface_t **surf_ptr) {
+int handle_client_message(int fd, surface_t **surf_ptr) {
     NovaFrameHeader header;
     uint8_t stack_buf[1024];
     uint8_t *buffer = stack_buf;
@@ -2306,28 +2359,28 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     memset(stack_buf, 0, sizeof(stack_buf));
 
     if (recv_all(fd, &header, sizeof(header)) < 0) {
-        return;
+        return -1;
     }
 
     if (header.magic != NOVA_MAGIC) {
-        return;
+        return -1;
     }
 
     if (header.payload_size > 0) {
         if (header.payload_size > 64 * 1024 * 1024) {
-            return;
+            return -1;
         }
 
         if (header.payload_size > sizeof(stack_buf)) {
             buffer = malloc(header.payload_size + 1);
-            if (!buffer) return;
+            if (!buffer) return -1;
             memset(buffer, 0, header.payload_size + 1);
             allocated = true;
         }
 
         if (recv_all(fd, buffer, header.payload_size) < 0) {
             if (allocated) free(buffer);
-            return;
+            return -1;
         }
     }
 
@@ -2663,6 +2716,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
                 surface_remove(surf);
                 free(surf);
                 *surf_ptr = NULL;
+                needs_composite = true;
             }
             break;
         }
@@ -2729,6 +2783,7 @@ void handle_client_message(int fd, surface_t **surf_ptr) {
     if (allocated) {
         free(buffer);
     }
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -3274,75 +3329,23 @@ int main(int argc, char *argv[]) {
                 else if (i >= client_poll_start) {
                     int client_fd = poll_fds[i].fd;
                     surface_t *surf = client_surfaces[i];
-                    struct pollfd check_pfd = { .fd = client_fd, .events = POLLIN, .revents = 0 };
-                    int max_drain = 32;
-                    while (max_drain-- > 0 && poll(&check_pfd, 1, 0) > 0 && (check_pfd.revents & POLLIN)) {
-                        handle_client_message(client_fd, &surf);
-                        check_pfd.revents = 0;
+                    if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
+                        disconnect_client(client_fd);
+                    } else if (poll_fds[i].revents & POLLIN) {
+                        struct pollfd check_pfd = { .fd = client_fd, .events = POLLIN, .revents = 0 };
+                        int max_drain = 32;
+                        while (max_drain-- > 0 && poll(&check_pfd, 1, 0) > 0 && (check_pfd.revents & POLLIN)) {
+                            if (handle_client_message(client_fd, &surf) < 0) {
+                                disconnect_client(client_fd);
+                                break;
+                            }
+                            check_pfd.revents = 0;
+                        }
                     }
                 }
             } else if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
-                int client_fd = poll_fds[i].fd;
-                bool is_disconnected = (poll_fds[i].revents & POLLERR) != 0;
-                if (!is_disconnected) {
-                    char drain_buf[256];
-                    ssize_t drain_rc;
-                    while ((drain_rc = recv(client_fd, drain_buf, sizeof(drain_buf), 0)) > 0);
-                    if (drain_rc == 0) {
-                        is_disconnected = true;
-                    } else if (drain_rc < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                        is_disconnected = true;
-                    }
-                }
-
-                if (!is_disconnected) continue;
-
-                // Release active client list slot
-                for (int k = 0; k < MAX_CLIENTS; k++) {
-                    if (clients[k].active && clients[k].fd == client_fd) {
-                        clients[k].active = false;
-                        close(client_fd);
-                        client_count--;
-                        break;
-                    }
-                }
-
-                // Delete surface belonging to closed client descriptor
-                surface_t *curr = surface_head;
-                while (curr) {
-                    surface_t *next = curr->next;
-                    if (curr->client_fd == client_fd) {
-                        broadcast_window_event(EVT_WINDOW_DESTROYED, curr);
-                        if (curr->pixels) {
-                            munmap(curr->pixels, curr->shm_size);
-                        }
-                        unlink(curr->shm_path);
-
-                        if (curr->pending_pixels) {
-                            munmap(curr->pending_pixels, curr->pending_w * curr->pending_h * 4);
-                            unlink(curr->pending_shm_path);
-                        }
-                        curr->resize_preview_active = false;
-                        clear_resize_state(curr);
-
-                        if (curr->focused) {
-                            curr->focused = false;
-                            surface_t *fallback = surface_get_focused();
-                            if (fallback && fallback != curr) {
-                                set_focus(fallback);
-                            }
-                        }
-
-                        if (curr->icon_pixels) {
-                            free(curr->icon_pixels);
-                            curr->icon_pixels = NULL;
-                        }
-
-                        surface_remove(curr);
-                        free(curr);
-                        needs_composite = true;
-                    }
-                    curr = next;
+                if (i >= client_poll_start) {
+                    disconnect_client(poll_fds[i].fd);
                 }
             }
         }

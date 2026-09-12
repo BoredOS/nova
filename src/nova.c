@@ -3329,9 +3329,7 @@ int main(int argc, char *argv[]) {
                 else if (i >= client_poll_start) {
                     int client_fd = poll_fds[i].fd;
                     surface_t *surf = client_surfaces[i];
-                    if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
-                        disconnect_client(client_fd);
-                    } else if (poll_fds[i].revents & POLLIN) {
+                    if (poll_fds[i].revents & POLLIN) {
                         struct pollfd check_pfd = { .fd = client_fd, .events = POLLIN, .revents = 0 };
                         int max_drain = 32;
                         while (max_drain-- > 0 && poll(&check_pfd, 1, 0) > 0 && (check_pfd.revents & POLLIN)) {
@@ -3341,6 +3339,9 @@ int main(int argc, char *argv[]) {
                             }
                             check_pfd.revents = 0;
                         }
+                    }
+                    if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
+                        disconnect_client(client_fd);
                     }
                 }
             } else if (poll_fds[i].revents & (POLLHUP | POLLERR)) {
@@ -3501,7 +3502,24 @@ int main(int argc, char *argv[]) {
     munmap(fb_mem, fb_size);
     close(fb_fd);
 
-    if (ioctl(0, KDSETMODE, (void*)KD_TEXT) < 0) {
+    bool tty_restored = false;
+    if (ioctl(0, KDSETMODE, (void*)KD_TEXT) == 0) {
+        tty_restored = true;
+    } else {
+        int tfd = open("/dev/tty0", O_RDWR);
+        if (tfd >= 0) {
+            if (ioctl(tfd, KDSETMODE, (void*)KD_TEXT) == 0) tty_restored = true;
+            close(tfd);
+        }
+        if (!tty_restored) {
+            tfd = open("/dev/console", O_RDWR);
+            if (tfd >= 0) {
+                if (ioctl(tfd, KDSETMODE, (void*)KD_TEXT) == 0) tty_restored = true;
+                close(tfd);
+            }
+        }
+    }
+    if (!tty_restored) {
         fprintf(stderr, "Nova Compositor Warning: Cannot restore TTY mode\n");
     }
 

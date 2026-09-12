@@ -2,12 +2,12 @@
 // This software is released under the GNU General Public License v3.0. See LICENSE file for details.
 // This header needs to maintain in any file it is present in, as per the GPL license terms.
 
-// BOREDOS_APP_DESC: Shows BoredOS information.
-
 #include "ntk.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <syscall.h>
 
 #define BRANDING_PATH "/Library/Images/branding/bos.png"
 
@@ -22,13 +22,13 @@ static void read_system_info(AboutState *st) {
     strcpy(st->os_version,     "Unknown Version");
     strcpy(st->kernel_version, "Unknown Kernel");
 
-    FILE *f = fopen("/proc/version", "r");
-    if (!f) return;
+    int fd = sys_open("/proc/version", "r");
+    if (fd < 0) return;
 
     char v_buf[512];
-    size_t bytes = fread(v_buf, 1, sizeof(v_buf) - 1, f);
-    fclose(f);
-    if (bytes == 0) return;
+    int bytes = sys_read(fd, v_buf, sizeof(v_buf) - 1);
+    sys_close(fd);
+    if (bytes <= 0) return;
     v_buf[bytes] = '\0';
 
     char *l1 = v_buf;
@@ -47,7 +47,7 @@ int main(void) {
     AboutState state;
     read_system_info(&state);
 
-    NtkWidget *win = ntk_window_new("About BoredOS", 420, 260);
+    NtkWidget *win = ntk_window_new("About BoredOS", 380, 260);
     if (!win) {
         ntk_app_destroy(app);
         return 1;
@@ -55,18 +55,25 @@ int main(void) {
     ntk_window_set_resizable(win, false);
 
     NtkWidget *vbox = ntk_box_new(NTK_VERTICAL, win);
-    ntk_box_set_spacing(vbox, 10);
+    ntk_box_set_spacing(vbox, 4);
     ntk_window_set_content(win, vbox);
 
-    NtkWidget *img = ntk_image_new_from_file(BRANDING_PATH, vbox);
-    if (img) {
-        ntk_image_set_scale_mode(img, NTK_SCALE_FIT);
-        ntk_widget_set_min_size(img, NTK_SIZE(360, 90));
-        ntk_box_pack_start(vbox, img, false, false, 10);
+    NtkPixmap *pm = ntk_pixmap_new_thumbnail_from_file(BRANDING_PATH, 160, 56);
+    if (pm) {
+        NtkWidget *img = ntk_image_new(vbox);
+        if (img) {
+            ntk_image_set_pixmap(img, pm);
+            ntk_image_set_scale_mode(img, NTK_SCALE_FIT);
+            ntk_widget_set_min_size(img, NTK_SIZE(160, 56));
+            ntk_widget_set_max_size(img, NTK_SIZE(160, 56));
+            ntk_box_pack_start(vbox, img, false, false, 4);
+        } else {
+            ntk_pixmap_destroy(pm);
+        }
     } else {
         NtkWidget *fallback_lbl = ntk_label_new("BoredOS", vbox);
         ntk_label_set_alignment(fallback_lbl, NTK_ALIGN_CENTER);
-        ntk_box_pack_start(vbox, fallback_lbl, false, false, 20);
+        ntk_box_pack_start(vbox, fallback_lbl, false, false, 6);
     }
 
     NtkWidget *lbl_name = ntk_label_new(state.os_name, vbox);
@@ -81,9 +88,9 @@ int main(void) {
     ntk_label_set_alignment(lbl_kern, NTK_ALIGN_CENTER);
     ntk_box_pack_start(vbox, lbl_kern, false, false, 2);
 
-    NtkWidget *sep = ntk_label_new("____________________________________________________", vbox);
+    NtkWidget *sep = ntk_label_new("----------------------------------------", vbox);
     ntk_label_set_alignment(sep, NTK_ALIGN_CENTER);
-    ntk_box_pack_start(vbox, sep, false, false, 5);
+    ntk_box_pack_start(vbox, sep, false, false, 4);
 
     NtkWidget *lbl_copyright = ntk_label_new("(C) 2023-2026 BoredOS Contributors", vbox);
     ntk_label_set_alignment(lbl_copyright, NTK_ALIGN_CENTER);

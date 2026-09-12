@@ -1,12 +1,12 @@
 // Copyright (c) 2023-2026 Christiaan (chris@boreddev.nl)
 // This software is released under the GNU General Public License v3.0. See LICENSE file for details.
-// This header needs to maintain in any file it is present in, as per the GPL license terms.// BOREDOS_APP_DESC: Taskbar with start menu, window list, and clock.
-// BOREDOS_APP_ICONS: /Library/images/icons/serenityicons/32x32/app-terminal.png
+// This header needs to maintain in any file it is present in, as per the GPL license terms.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <stdint.h>
@@ -613,10 +613,18 @@ static void add_window(uint32_t surface_id, const char *title, uint32_t state_fl
 
 static bool read_rtc(int dt[6]) {
     if (!dt) return false;
-    if (rtc_get(dt) != 0) {
-        return false;
+    time_t now = time(NULL);
+    struct tm tm;
+    if (localtime_r(&now, &tm)) {
+        dt[0] = tm.tm_year + 1900;
+        dt[1] = tm.tm_mon + 1;
+        dt[2] = tm.tm_mday;
+        dt[3] = tm.tm_hour;
+        dt[4] = tm.tm_min;
+        dt[5] = tm.tm_sec;
+        return true;
     }
-    return true;
+    return (rtc_get(dt) == 0);
 }
 
 static void append_str(char *out, size_t out_size, size_t *pos, const char *src) {
@@ -1686,8 +1694,8 @@ static void handle_menu_pointer(int px, int py, uint32_t buttons) {
             close_menu();
         } else if (item.type == ITEM_EXIT) {
             nova_quit(fd);
-            close_taskbar();
             close_menu();
+            close_taskbar();
         }
     }
 }
@@ -1973,8 +1981,8 @@ static void handle_menu_key(const NovaEvent *ev) {
                     close_menu();
                 } else if (item.type == ITEM_EXIT) {
                     nova_quit(fd);
-                    close_taskbar();
                     close_menu();
+                    close_taskbar();
                 }
             }
         }

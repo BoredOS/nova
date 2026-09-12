@@ -188,7 +188,7 @@ static void label_paint(NtkWidget *w, NtkPainter *p) {
 
     NtkRect saved_clip = ntk_painter_get_clip_rect(p);
     bool had_clip = ntk_painter_has_clip(p);
-    ntk_painter_set_clip_rect(p, NTK_RECT(origin.x, origin.y, geom.width, geom.height));
+    ntk_painter_set_clip_rect(p, NTK_RECT(origin.x, origin.y - 2, geom.width, geom.height + 4));
 
     for (int i = 0; i < line_count; i++) {
         char *line_str = malloc(lines[i].len + 1);

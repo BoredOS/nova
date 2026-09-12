@@ -1,5 +1,6 @@
-# Copyright (c) 2026 Christiaan (chris@boreddev.nl)
-# Nova Desktop Environment & GUI SDK Makefile
+# Copyright (c) 2023-2026 Christiaan (chris@boreddev.nl)
+# This software is released under the GNU General Public License v3.0. See LICENSE file for details.
+# This header needs to maintain in any file it is present in, as per the GPL license terms.
 
 .SECONDARY:
 
@@ -19,7 +20,7 @@ LDFLAGS = -Wl,-z,max-page-size=0x1000 -Wl,-dynamic-linker,/usr/lib/ld.so -Wl,-rp
           -L$(SDK_PATH)/lib -lm
 
 LIBS = obj/libnovaproto.a obj/libntk.a
-APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf installer.elf term.elf explorer.elf
+APPS = nova.elf taskbar.elf wallpaperd.elf about.elf helloworld.elf run.elf term.elf explorer.elf
 
 all: $(LIBS)
 	$(MAKE) export-sdk
